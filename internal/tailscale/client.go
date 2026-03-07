@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"slices"
+	"sort"
 
 	"go.uber.org/zap"
 )
@@ -49,6 +51,18 @@ type HTTPHandler struct {
 	Proxy    string `json:",omitempty"`
 	Text     string `json:",omitempty"`
 	Redirect string `json:",omitempty"`
+}
+
+// Prefs is a subset of ipn.Prefs containing only the fields we need.
+type Prefs struct {
+	AdvertiseServices []string `json:",omitempty"`
+}
+
+// MaskedPrefs mirrors ipn.MaskedPrefs for the AdvertiseServices field.
+// The embedded Prefs contains the values; the Set bool indicates which fields to apply.
+type MaskedPrefs struct {
+	Prefs
+	AdvertiseServicesSet bool `json:",omitempty"`
 }
 
 // Service is our internal representation of a discovered Consul service
@@ -92,6 +106,31 @@ func (c *Client) Apply(services []Service) error {
 	normalizeConfig(current)
 	normalizeConfig(desired)
 
+	// Compute the desired list of service names to advertise.
+	desiredNames := make([]string, 0, len(services))
+	for _, svc := range services {
+		desiredNames = append(desiredNames, fmt.Sprintf("svc:%s", svc.Hostname))
+	}
+	sort.Strings(desiredNames)
+
+	// Update advertised services via prefs API.
+	prefs, err := c.getPrefs()
+	if err != nil {
+		return fmt.Errorf("failed to read current prefs: %w", err)
+	}
+
+	currentNames := make([]string, len(prefs.AdvertiseServices))
+	copy(currentNames, prefs.AdvertiseServices)
+	sort.Strings(currentNames)
+
+	if !slices.Equal(currentNames, desiredNames) {
+		if err := c.setAdvertiseServices(desiredNames); err != nil {
+			return fmt.Errorf("failed to advertise services: %w", err)
+		}
+		c.logger.Info("advertised services updated", zap.Strings("services", desiredNames))
+	}
+
+	// Update serve config.
 	if reflect.DeepEqual(current.Services, desired.Services) {
 		c.logger.Debug("serve config unchanged, skipping apply")
 		return nil
@@ -117,6 +156,58 @@ func normalizeConfig(cfg *ServeConfig) {
 }
 
 const localAPIBase = "http://local-tailscaled.sock/localapi/v0/serve-config"
+const prefsAPIBase = "http://local-tailscaled.sock/localapi/v0/prefs"
+
+func (c *Client) getPrefs() (*Prefs, error) {
+	resp, err := c.http.Get(prefsAPIBase)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("prefs API returned %d: %s", resp.StatusCode, body)
+	}
+
+	var prefs Prefs
+	if err := json.NewDecoder(resp.Body).Decode(&prefs); err != nil {
+		return nil, fmt.Errorf("failed to decode prefs: %w", err)
+	}
+	return &prefs, nil
+}
+
+func (c *Client) setAdvertiseServices(svcNames []string) error {
+	mp := &MaskedPrefs{
+		Prefs:                Prefs{AdvertiseServices: svcNames},
+		AdvertiseServicesSet: true,
+	}
+
+	data, err := json.Marshal(mp)
+	if err != nil {
+		return fmt.Errorf("failed to marshal prefs: %w", err)
+	}
+
+	c.logger.Debug("setting advertise services", zap.String("prefs", string(data)))
+
+	req, err := http.NewRequest(http.MethodPatch, prefsAPIBase, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("failed to create prefs request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to patch prefs: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("prefs API returned %d: %s", resp.StatusCode, body)
+	}
+	return nil
+}
 
 func (c *Client) getConfig() (*ServeConfig, error) {
 	resp, err := c.http.Get(localAPIBase)

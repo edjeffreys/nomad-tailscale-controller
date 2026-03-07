@@ -5,10 +5,34 @@ import (
 "io"
 "net/http"
 "net/http/httptest"
+"slices"
+"sort"
 "testing"
 
 "go.uber.org/zap"
 )
+
+// defaultPrefsHandler returns a handler that serves empty prefs on GET
+// and accepts PATCH to update AdvertiseServices.
+func defaultPrefsHandler(advertised *[]string) http.HandlerFunc {
+return func(w http.ResponseWriter, r *http.Request) {
+switch r.Method {
+case http.MethodGet:
+	prefs := &Prefs{AdvertiseServices: *advertised}
+	json.NewEncoder(w).Encode(prefs)
+case http.MethodPatch:
+	var mp MaskedPrefs
+	body, _ := io.ReadAll(r.Body)
+	json.Unmarshal(body, &mp)
+	if mp.AdvertiseServicesSet {
+		*advertised = mp.AdvertiseServices
+	}
+	json.NewEncoder(w).Encode(&Prefs{AdvertiseServices: *advertised})
+default:
+	w.WriteHeader(http.StatusMethodNotAllowed)
+}
+}
+}
 
 func TestBuildServeConfig_Empty(t *testing.T) {
 c := &Client{logger: zap.NewNop()}
@@ -145,12 +169,10 @@ t.Error("expected TCPForward in JSON")
 if !contains(jsonStr, `"localhost:3000"`) {
 t.Error("expected backend addr in JSON")
 }
-// Must NOT contain version (old format artifact)
 if contains(jsonStr, `"version"`) {
 t.Error("unexpected version field in JSON")
 }
 
-// Round-trip
 var decoded ServeConfig
 if err := json.Unmarshal(data, &decoded); err != nil {
 t.Fatal(err)
@@ -175,6 +197,7 @@ TCP: map[uint16]*TCPPortHandler{
 },
 },
 }
+advertised := []string{"svc:myapp"}
 
 postCalled := false
 mux := http.NewServeMux()
@@ -186,6 +209,7 @@ return
 postCalled = true
 w.WriteHeader(http.StatusOK)
 })
+mux.HandleFunc("/localapi/v0/prefs", defaultPrefsHandler(&advertised))
 
 srv := httptest.NewServer(mux)
 t.Cleanup(srv.Close)
@@ -210,6 +234,7 @@ t.Error("expected POST to be skipped when config is unchanged")
 func TestApply_PostsWhenChanged(t *testing.T) {
 var postedConfig ServeConfig
 postCalled := false
+advertised := []string{}
 
 mux := http.NewServeMux()
 mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
@@ -222,6 +247,7 @@ body, _ := io.ReadAll(r.Body)
 json.Unmarshal(body, &postedConfig)
 w.WriteHeader(http.StatusOK)
 })
+mux.HandleFunc("/localapi/v0/prefs", defaultPrefsHandler(&advertised))
 
 srv := httptest.NewServer(mux)
 t.Cleanup(srv.Close)
@@ -250,6 +276,129 @@ handler := svcCfg.TCP[443]
 if handler == nil || handler.TCPForward != "sonarr:8989" {
 t.Errorf("TCPForward = %q, want %q", handler.TCPForward, "sonarr:8989")
 }
+
+// Verify advertise was called
+sort.Strings(advertised)
+if !slices.Equal(advertised, []string{"svc:sonarr"}) {
+t.Errorf("advertised = %v, want [svc:sonarr]", advertised)
+}
+}
+
+func TestApply_AdvertisesMultipleServices(t *testing.T) {
+advertised := []string{}
+
+mux := http.NewServeMux()
+mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
+if r.Method == http.MethodGet {
+json.NewEncoder(w).Encode(&ServeConfig{})
+return
+}
+w.WriteHeader(http.StatusOK)
+})
+mux.HandleFunc("/localapi/v0/prefs", defaultPrefsHandler(&advertised))
+
+srv := httptest.NewServer(mux)
+t.Cleanup(srv.Close)
+
+c := &Client{
+logger: zap.NewNop(),
+http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
+}
+
+services := []Service{
+{Hostname: "sonarr", BackendAddr: "sonarr:8989", Port: 443},
+{Hostname: "mealie", BackendAddr: "mealie:9000", Port: 9000},
+}
+
+if err := c.Apply(services); err != nil {
+t.Fatal(err)
+}
+
+sort.Strings(advertised)
+want := []string{"svc:mealie", "svc:sonarr"}
+if !slices.Equal(advertised, want) {
+t.Errorf("advertised = %v, want %v", advertised, want)
+}
+}
+
+func TestApply_SkipsAdvertiseWhenAlreadyCurrent(t *testing.T) {
+advertised := []string{"svc:myapp"}
+patchCalled := false
+
+mux := http.NewServeMux()
+mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
+if r.Method == http.MethodGet {
+json.NewEncoder(w).Encode(&ServeConfig{
+Services: map[string]*ServiceConfig{
+"svc:myapp": {TCP: map[uint16]*TCPPortHandler{443: {TCPForward: "myapp:3000"}}},
+},
+})
+return
+}
+w.WriteHeader(http.StatusOK)
+})
+mux.HandleFunc("/localapi/v0/prefs", func(w http.ResponseWriter, r *http.Request) {
+if r.Method == http.MethodGet {
+json.NewEncoder(w).Encode(&Prefs{AdvertiseServices: advertised})
+return
+}
+patchCalled = true
+w.WriteHeader(http.StatusOK)
+json.NewEncoder(w).Encode(&Prefs{AdvertiseServices: advertised})
+})
+
+srv := httptest.NewServer(mux)
+t.Cleanup(srv.Close)
+
+c := &Client{
+logger: zap.NewNop(),
+http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
+}
+
+services := []Service{
+{Hostname: "myapp", BackendAddr: "myapp:3000", Port: 443},
+}
+
+if err := c.Apply(services); err != nil {
+t.Fatal(err)
+}
+if patchCalled {
+t.Error("expected PATCH to be skipped when advertised services are already correct")
+}
+}
+
+func TestApply_RemovesStaleAdvertisedServices(t *testing.T) {
+advertised := []string{"svc:old-service", "svc:myapp"}
+
+mux := http.NewServeMux()
+mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
+if r.Method == http.MethodGet {
+json.NewEncoder(w).Encode(&ServeConfig{})
+return
+}
+w.WriteHeader(http.StatusOK)
+})
+mux.HandleFunc("/localapi/v0/prefs", defaultPrefsHandler(&advertised))
+
+srv := httptest.NewServer(mux)
+t.Cleanup(srv.Close)
+
+c := &Client{
+logger: zap.NewNop(),
+http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
+}
+
+services := []Service{
+{Hostname: "myapp", BackendAddr: "myapp:3000", Port: 443},
+}
+
+if err := c.Apply(services); err != nil {
+t.Fatal(err)
+}
+
+if !slices.Equal(advertised, []string{"svc:myapp"}) {
+t.Errorf("advertised = %v, want [svc:myapp] (old-service should be removed)", advertised)
+}
 }
 
 func TestApply_HandlesGetError(t *testing.T) {
@@ -257,6 +406,9 @@ mux := http.NewServeMux()
 mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
 w.WriteHeader(http.StatusInternalServerError)
 w.Write([]byte("internal error"))
+})
+mux.HandleFunc("/localapi/v0/prefs", func(w http.ResponseWriter, r *http.Request) {
+json.NewEncoder(w).Encode(&Prefs{})
 })
 
 srv := httptest.NewServer(mux)
@@ -277,6 +429,8 @@ t.Errorf("error should mention status code, got: %s", err)
 }
 
 func TestApply_HandlesPostError(t *testing.T) {
+advertised := []string{}
+
 mux := http.NewServeMux()
 mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
 if r.Method == http.MethodGet {
@@ -286,6 +440,7 @@ return
 w.WriteHeader(http.StatusConflict)
 w.Write([]byte("conflict"))
 })
+mux.HandleFunc("/localapi/v0/prefs", defaultPrefsHandler(&advertised))
 
 srv := httptest.NewServer(mux)
 t.Cleanup(srv.Close)
@@ -304,8 +459,68 @@ t.Errorf("error should mention 409, got: %s", err)
 }
 }
 
+func TestApply_HandlesPrefsGetError(t *testing.T) {
+mux := http.NewServeMux()
+mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
+json.NewEncoder(w).Encode(&ServeConfig{})
+})
+mux.HandleFunc("/localapi/v0/prefs", func(w http.ResponseWriter, r *http.Request) {
+w.WriteHeader(http.StatusInternalServerError)
+w.Write([]byte("prefs error"))
+})
+
+srv := httptest.NewServer(mux)
+t.Cleanup(srv.Close)
+
+c := &Client{
+logger: zap.NewNop(),
+http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
+}
+
+err := c.Apply([]Service{{Hostname: "test", BackendAddr: "test:80"}})
+if err == nil {
+t.Fatal("expected error when prefs GET fails")
+}
+if !contains(err.Error(), "prefs") {
+t.Errorf("error should mention prefs, got: %s", err)
+}
+}
+
+func TestApply_HandlesPrefsPatchError(t *testing.T) {
+mux := http.NewServeMux()
+mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
+json.NewEncoder(w).Encode(&ServeConfig{})
+})
+mux.HandleFunc("/localapi/v0/prefs", func(w http.ResponseWriter, r *http.Request) {
+if r.Method == http.MethodGet {
+json.NewEncoder(w).Encode(&Prefs{})
+return
+}
+w.WriteHeader(http.StatusInternalServerError)
+w.Write([]byte("patch failed"))
+})
+
+srv := httptest.NewServer(mux)
+t.Cleanup(srv.Close)
+
+c := &Client{
+logger: zap.NewNop(),
+http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
+}
+
+err := c.Apply([]Service{{Hostname: "test", BackendAddr: "test:80"}})
+if err == nil {
+t.Fatal("expected error when prefs PATCH fails")
+}
+if !contains(err.Error(), "advertise") {
+t.Errorf("error should mention advertise, got: %s", err)
+}
+}
+
 func TestApply_EmptyServicesNoopWhenAlreadyEmpty(t *testing.T) {
 postCalled := false
+advertised := []string{}
+
 mux := http.NewServeMux()
 mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
 if r.Method == http.MethodGet {
@@ -315,6 +530,7 @@ return
 postCalled = true
 w.WriteHeader(http.StatusOK)
 })
+mux.HandleFunc("/localapi/v0/prefs", defaultPrefsHandler(&advertised))
 
 srv := httptest.NewServer(mux)
 t.Cleanup(srv.Close)
@@ -355,6 +571,37 @@ t.Error("expected non-nil Services on 404")
 }
 if len(cfg.Services) != 0 {
 t.Errorf("expected empty Services on 404, got %d", len(cfg.Services))
+}
+}
+
+func TestMaskedPrefsJSON(t *testing.T) {
+mp := &MaskedPrefs{
+Prefs:                Prefs{AdvertiseServices: []string{"svc:mealie", "svc:sonarr"}},
+AdvertiseServicesSet: true,
+}
+
+data, err := json.Marshal(mp)
+if err != nil {
+t.Fatal(err)
+}
+
+jsonStr := string(data)
+if !contains(jsonStr, `"AdvertiseServicesSet":true`) {
+t.Errorf("expected AdvertiseServicesSet in JSON, got: %s", jsonStr)
+}
+if !contains(jsonStr, `"svc:mealie"`) {
+t.Errorf("expected svc:mealie in JSON, got: %s", jsonStr)
+}
+
+var decoded MaskedPrefs
+if err := json.Unmarshal(data, &decoded); err != nil {
+t.Fatal(err)
+}
+if !decoded.AdvertiseServicesSet {
+t.Error("AdvertiseServicesSet should survive round-trip")
+}
+if len(decoded.AdvertiseServices) != 2 {
+t.Errorf("expected 2 services, got %d", len(decoded.AdvertiseServices))
 }
 }
 
