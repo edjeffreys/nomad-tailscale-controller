@@ -15,16 +15,16 @@ Add these tags to any Nomad service to expose it via Tailscale:
 
 ```hcl
 service {
-  name = "sabnzbd"
-  port = "sabnzbd-http"
+  name = "whoami"
+  port = "whoami-http"
 
   tags = [
     "tailscale.enable=true",
-    "tailscale.hostname=sabnzbd",   # optional, defaults to service name
+    "tailscale.hostname=whoami",   # optional, defaults to service name
     "tailscale.port=443",           # optional, defaults to 443
     # tailscale.backend defaults to <service>.service.consul:<port>
     # override if needed:
-    # "tailscale.backend=sabnzbd.service.consul:8080",
+    # "tailscale.backend=whoami.service.consul:8080",
   ]
 }
 ```
