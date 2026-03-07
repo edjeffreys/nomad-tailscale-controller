@@ -1,13 +1,14 @@
 package tailscale
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
+	"io"
+	"net"
+	"net/http"
 	"reflect"
-	"sync"
 
 	"go.uber.org/zap"
 )
@@ -58,40 +59,89 @@ func (s *Service) BackendURL() string {
 	return fmt.Sprintf("http://%s", s.BackendAddr)
 }
 
-// Client manages the Tailscale serve config.
+// Client manages the Tailscale serve config via the local API.
 type Client struct {
-	socket  string
-	logger  *zap.Logger
-	mu      sync.Mutex
-	current *ServeConfig
-	tmpDir  string
+	socket string
+	logger *zap.Logger
+	http   *http.Client
 }
 
 func NewClient(socket string, logger *zap.Logger) *Client {
 	return &Client{
 		socket: socket,
 		logger: logger,
-		tmpDir: os.TempDir(),
+		http: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+				},
+			},
+		},
 	}
 }
 
 func (c *Client) Apply(services []Service) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	desired := c.buildServeConfig(services)
 
-	if reflect.DeepEqual(c.current, desired) {
+	current, err := c.getConfig()
+	if err != nil {
+		return fmt.Errorf("failed to read current serve config: %w", err)
+	}
+
+	if reflect.DeepEqual(current, desired) {
 		c.logger.Debug("serve config unchanged, skipping apply")
 		return nil
 	}
 
-	if err := c.applyConfig(desired); err != nil {
+	if err := c.postConfig(desired); err != nil {
 		return err
 	}
 
-	c.current = desired
 	c.logger.Info("serve config applied", zap.Int("services", len(services)))
+	return nil
+}
+
+func (c *Client) getConfig() (*ServeConfig, error) {
+	resp, err := c.http.Get("http://local-tailscaled.sock/localapi/v0/serve/config")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("local API returned %d: %s", resp.StatusCode, body)
+	}
+
+	var cfg ServeConfig
+	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("failed to decode serve config: %w", err)
+	}
+	return &cfg, nil
+}
+
+func (c *Client) postConfig(cfg *ServeConfig) error {
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal serve config: %w", err)
+	}
+
+	c.logger.Debug("applying serve config", zap.String("config", string(data)))
+
+	resp, err := c.http.Post(
+		"http://local-tailscaled.sock/localapi/v0/serve/config",
+		"application/json",
+		bytes.NewReader(data),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to post serve config: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("local API returned %d: %s", resp.StatusCode, body)
+	}
 	return nil
 }
 
@@ -120,25 +170,3 @@ func (c *Client) buildServeConfig(services []Service) *ServeConfig {
 	return cfg
 }
 
-func (c *Client) applyConfig(cfg *ServeConfig) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal serve config: %w", err)
-	}
-
-	tmpFile := filepath.Join(c.tmpDir, "tailscale-serve.json")
-	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
-		return fmt.Errorf("failed to write serve config: %w", err)
-	}
-	defer os.Remove(tmpFile)
-
-	c.logger.Debug("applying serve config", zap.String("config", string(data)))
-
-	cmd := exec.Command("tailscale", "serve", "--config", tmpFile)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("tailscale serve failed: %w\noutput: %s", err, string(out))
-	}
-
-	return nil
-}
