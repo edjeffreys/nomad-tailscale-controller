@@ -98,3 +98,27 @@ func TestParseTags(t *testing.T) {
 		})
 	}
 }
+
+func TestIsSidecarProxy(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"mealie-sidecar-proxy", true},
+		{"sonarr-sidecar-proxy", true},
+		{"plex-sidecar-proxy", true},
+		{"mealie", false},
+		{"sonarr", false},
+		{"consul", false},
+		{"sidecar-proxy", false},
+		{"my-app-sidecar-proxy-service", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSidecarProxy(tt.name); got != tt.want {
+				t.Errorf("isSidecarProxy(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}

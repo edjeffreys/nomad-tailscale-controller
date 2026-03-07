@@ -236,6 +236,14 @@ func (w *Watcher) fetchServices(ctx context.Context) ([]tailscale.Service, error
 			zap.Strings("tags", svcTags),
 		)
 
+		// Consul Connect sidecar proxies inherit parent tags — skip them
+		if isSidecarProxy(svcName) {
+			w.logger.Debug("skipping sidecar proxy",
+				zap.String("service", svcName),
+			)
+			continue
+		}
+
 		tags := parseTags(svcTags, w.cfg.TagPrefix)
 
 		if tags[tagEnable] != "true" {
@@ -315,4 +323,10 @@ func parseTags(tags []string, prefix string) map[string]string {
 		}
 	}
 	return result
+}
+
+// isSidecarProxy returns true for Consul Connect sidecar proxy services,
+// which inherit their parent's tags and should not be treated as separate services.
+func isSidecarProxy(name string) bool {
+	return strings.HasSuffix(name, "-sidecar-proxy")
 }
