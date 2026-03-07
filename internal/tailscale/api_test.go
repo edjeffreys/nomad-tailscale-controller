@@ -12,13 +12,16 @@ import (
 )
 
 func TestEnsureService_CreateNew(t *testing.T) {
-	var receivedMethod string
-	var receivedPath string
+	var putReceived bool
 	var receivedBody VIPService
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedMethod = r.Method
-		receivedPath = r.URL.Path
+		if r.Method == http.MethodGet {
+			// Service doesn't exist yet
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		putReceived = true
 		body, _ := io.ReadAll(r.Body)
 		json.Unmarshal(body, &receivedBody)
 		w.WriteHeader(http.StatusCreated)
@@ -27,16 +30,8 @@ func TestEnsureService_CreateNew(t *testing.T) {
 
 	client := &APIClient{
 		tailnet: "test.ts.net",
-		http:    srv.Client(),
+		http:    &http.Client{Transport: &apiRewriteTransport{base: srv.Client().Transport, target: srv.URL}},
 		logger:  zap.NewNop(),
-	}
-	// Override apiBase for tests
-	origBase := apiBase
-	defer func() {}()
-
-	// Use the test server URL directly by making a client that rewrites URLs
-	client.http = &http.Client{
-		Transport: &apiRewriteTransport{base: srv.Client().Transport, target: srv.URL},
 	}
 
 	svc := VIPService{
@@ -50,24 +45,57 @@ func TestEnsureService_CreateNew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if receivedMethod != http.MethodPut {
-		t.Errorf("method = %s, want PUT", receivedMethod)
-	}
-	if receivedPath != "/api/v2/tailnet/test.ts.net/vip-services/svc:mealie" {
-		t.Errorf("path = %s, want /api/v2/tailnet/test.ts.net/vip-services/svc:mealie", receivedPath)
+	if !putReceived {
+		t.Error("expected PUT to be called for new service")
 	}
 	if receivedBody.Name != "svc:mealie" {
 		t.Errorf("body name = %s, want svc:mealie", receivedBody.Name)
 	}
-	_ = origBase
+}
+
+func TestEnsureService_SkipsExisting(t *testing.T) {
+	putCalled := false
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			// Service already exists
+			json.NewEncoder(w).Encode(VIPService{
+				Name:  "svc:mealie",
+				Addrs: []string{"100.64.0.1", "fd7a::1"},
+				Ports: []string{"tcp:443"},
+			})
+			return
+		}
+		putCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &APIClient{
+		tailnet: "test.ts.net",
+		http:    &http.Client{Transport: &apiRewriteTransport{base: srv.Client().Transport, target: srv.URL}},
+		logger:  zap.NewNop(),
+	}
+
+	err := client.EnsureService(context.Background(), VIPService{Name: "svc:mealie", Ports: []string{"tcp:443"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if putCalled {
+		t.Error("PUT should not be called when service already exists")
+	}
 }
 
 func TestEnsureService_AddsSvcPrefix(t *testing.T) {
 	var receivedBody VIPService
-	var receivedPath string
+	var putPath string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedPath = r.URL.Path
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		putPath = r.URL.Path
 		body, _ := io.ReadAll(r.Body)
 		json.Unmarshal(body, &receivedBody)
 		w.WriteHeader(http.StatusOK)
@@ -90,8 +118,8 @@ func TestEnsureService_AddsSvcPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if receivedPath != "/api/v2/tailnet/test.ts.net/vip-services/svc:mealie" {
-		t.Errorf("path = %s, want svc: prefix in URL", receivedPath)
+	if putPath != "/api/v2/tailnet/test.ts.net/vip-services/svc:mealie" {
+		t.Errorf("path = %s, want svc: prefix in URL", putPath)
 	}
 	if receivedBody.Name != "svc:mealie" {
 		t.Errorf("body name = %s, want svc:mealie", receivedBody.Name)
@@ -100,6 +128,10 @@ func TestEnsureService_AddsSvcPrefix(t *testing.T) {
 
 func TestEnsureService_APIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		w.WriteHeader(http.StatusForbidden)
 		w.Write([]byte("insufficient permissions"))
 	}))

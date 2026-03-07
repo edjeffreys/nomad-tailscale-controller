@@ -167,25 +167,11 @@ func (w *Watcher) reconcile(ctx context.Context) error {
 	return w.ts.Apply(services)
 }
 
-// ensureAPIServices creates or updates Tailscale Service definitions via the control plane API.
-// Only creates services that don't already exist to minimize API calls.
+// ensureAPIServices creates Tailscale VIP Service definitions via the control plane API.
+// Each service is checked individually — if it already exists, the PUT is skipped.
 func (w *Watcher) ensureAPIServices(ctx context.Context, services []tailscale.Service) error {
-	existing, err := w.api.ListServices(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to list existing services: %w", err)
-	}
-
-	existingNames := make(map[string]bool, len(existing))
-	for _, svc := range existing {
-		existingNames[svc.Name] = true
-	}
-
 	for _, svc := range services {
 		svcName := fmt.Sprintf("svc:%s", svc.Hostname)
-		if existingNames[svcName] {
-			w.logger.Debug("service already exists in control plane", zap.String("service", svcName))
-			continue
-		}
 
 		port := svc.Port
 		if port == 0 {
