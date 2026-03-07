@@ -89,7 +89,10 @@ func (c *Client) Apply(services []Service) error {
 		return fmt.Errorf("failed to read current serve config: %w", err)
 	}
 
-	// Compare without ETags
+	// Normalize nil maps so DeepEqual treats nil and empty maps the same
+	normalizeConfig(current)
+	normalizeConfig(desired)
+
 	currentCopy := *current
 	currentCopy.ETag = ""
 	if reflect.DeepEqual(&currentCopy, desired) {
@@ -105,6 +108,15 @@ func (c *Client) Apply(services []Service) error {
 
 	c.logger.Info("serve config applied", zap.Int("services", len(services)))
 	return nil
+}
+
+func normalizeConfig(cfg *ServeConfig) {
+	if cfg.TCP == nil {
+		cfg.TCP = make(map[string]TCPConfig)
+	}
+	if cfg.Web == nil {
+		cfg.Web = make(map[string]WebConfig)
+	}
 }
 
 const localAPIBase = "http://local-tailscaled.sock/localapi/v0/serve-config"

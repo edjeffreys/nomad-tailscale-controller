@@ -170,13 +170,32 @@ func (w *Watcher) fetchServices(ctx context.Context, namespace string) ([]tailsc
 		return nil, err
 	}
 
+	totalServices := 0
+	for _, stub := range stubs {
+		totalServices += len(stub.Services)
+	}
+	w.logger.Debug("fetched nomad services",
+		zap.String("namespace", namespace),
+		zap.Int("namespaces_returned", len(stubs)),
+		zap.Int("total_services", totalServices),
+	)
+
 	var result []tailscale.Service
 
 	for _, stub := range stubs {
 		for _, svc := range stub.Services {
+			w.logger.Debug("evaluating service",
+				zap.String("namespace", stub.Namespace),
+				zap.String("service", svc.ServiceName),
+				zap.Strings("tags", svc.Tags),
+			)
+
 			tags := parseTags(svc.Tags, w.cfg.TagPrefix)
 
 			if tags[tagEnable] != "true" {
+				w.logger.Debug("skipping service: tailscale.enable not set",
+					zap.String("service", svc.ServiceName),
+				)
 				continue
 			}
 
