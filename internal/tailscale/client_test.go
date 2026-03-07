@@ -10,52 +10,38 @@ import (
 "go.uber.org/zap"
 )
 
-func TestServiceBackendURL(t *testing.T) {
-s := &Service{BackendAddr: "sabnzbd.service.consul:8080"}
-want := "http://sabnzbd.service.consul:8080"
-if got := s.BackendURL(); got != want {
-t.Errorf("BackendURL() = %q, want %q", got, want)
-}
-}
-
-func TestBuildServicesConfig_Empty(t *testing.T) {
+func TestBuildServeConfig_Empty(t *testing.T) {
 c := &Client{logger: zap.NewNop()}
-cfg := c.buildServicesConfig(nil)
+cfg := c.buildServeConfig(nil)
 
-if cfg.Version != "0.0.1" {
-t.Errorf("Version = %q, want 0.0.1", cfg.Version)
-}
 if len(cfg.Services) != 0 {
 t.Errorf("expected empty Services map, got %v", cfg.Services)
 }
 }
 
-func TestBuildServicesConfig_SingleService(t *testing.T) {
+func TestBuildServeConfig_SingleService(t *testing.T) {
 c := &Client{logger: zap.NewNop()}
 
 services := []Service{
 {Hostname: "sonarr", BackendAddr: "sonarr.service.consul:8989", Port: 443},
 }
 
-cfg := c.buildServicesConfig(services)
+cfg := c.buildServeConfig(services)
 
-svcDef, ok := cfg.Services["svc:sonarr"]
+svcCfg, ok := cfg.Services["svc:sonarr"]
 if !ok {
 t.Fatal("expected service entry for svc:sonarr")
 }
-if !svcDef.Advertised {
-t.Error("expected Advertised = true")
-}
-target, ok := svcDef.Endpoints["tcp:443"]
+handler, ok := svcCfg.TCP[443]
 if !ok {
-t.Fatal("expected endpoint for tcp:443")
+t.Fatal("expected TCP handler for port 443")
 }
-if target != "http://sonarr.service.consul:8989" {
-t.Errorf("endpoint target = %q, want %q", target, "http://sonarr.service.consul:8989")
+if handler.TCPForward != "sonarr.service.consul:8989" {
+t.Errorf("TCPForward = %q, want %q", handler.TCPForward, "sonarr.service.consul:8989")
 }
 }
 
-func TestBuildServicesConfig_MultipleServices(t *testing.T) {
+func TestBuildServeConfig_MultipleServices(t *testing.T) {
 c := &Client{logger: zap.NewNop()}
 
 services := []Service{
@@ -63,7 +49,7 @@ services := []Service{
 {Hostname: "radarr", BackendAddr: "radarr:7878", Port: 443},
 }
 
-cfg := c.buildServicesConfig(services)
+cfg := c.buildServeConfig(services)
 
 if len(cfg.Services) != 2 {
 t.Errorf("expected 2 services, got %d", len(cfg.Services))
@@ -76,38 +62,38 @@ t.Error("missing svc:radarr")
 }
 }
 
-func TestBuildServicesConfig_CustomPort(t *testing.T) {
+func TestBuildServeConfig_CustomPort(t *testing.T) {
 c := &Client{logger: zap.NewNop()}
 
 services := []Service{
 {Hostname: "myapp", BackendAddr: "myapp:3000", Port: 8443},
 }
 
-cfg := c.buildServicesConfig(services)
+cfg := c.buildServeConfig(services)
 
-svcDef := cfg.Services["svc:myapp"]
-if _, ok := svcDef.Endpoints["tcp:8443"]; !ok {
-t.Error("expected endpoint for tcp:8443")
+svcCfg := cfg.Services["svc:myapp"]
+if _, ok := svcCfg.TCP[8443]; !ok {
+t.Error("expected TCP handler for port 8443")
 }
 }
 
-func TestBuildServicesConfig_ZeroPortDefaultsTo443(t *testing.T) {
+func TestBuildServeConfig_ZeroPortDefaultsTo443(t *testing.T) {
 c := &Client{logger: zap.NewNop()}
 
 services := []Service{
 {Hostname: "myapp", BackendAddr: "myapp:3000", Port: 0},
 }
 
-cfg := c.buildServicesConfig(services)
+cfg := c.buildServeConfig(services)
 
-svcDef := cfg.Services["svc:myapp"]
-if _, ok := svcDef.Endpoints["tcp:443"]; !ok {
-t.Error("expected endpoint for tcp:443 when Port=0")
+svcCfg := cfg.Services["svc:myapp"]
+if _, ok := svcCfg.TCP[443]; !ok {
+t.Error("expected TCP handler for port 443 when Port=0")
 }
 }
 
 func TestNormalizeConfig(t *testing.T) {
-cfg := &ServicesConfig{}
+cfg := &ServeConfig{}
 if cfg.Services != nil {
 t.Fatal("precondition: Services should be nil")
 }
@@ -120,9 +106,9 @@ t.Error("expected Services to be non-nil after normalize")
 }
 
 func TestNormalizeConfig_AlreadyInitialized(t *testing.T) {
-cfg := &ServicesConfig{
-Services: map[string]*ServiceDef{
-"svc:test": {Endpoints: map[string]string{"tcp:443": "http://test:80"}, Advertised: true},
+cfg := &ServeConfig{
+Services: map[string]*ServiceConfig{
+"svc:test": {TCP: map[uint16]*TCPPortHandler{443: {TCPForward: "test:80"}}},
 },
 }
 
@@ -133,13 +119,13 @@ t.Error("normalize should not clear existing services")
 }
 }
 
-func TestServicesConfigJSON(t *testing.T) {
-cfg := &ServicesConfig{
-Version: "0.0.1",
-Services: map[string]*ServiceDef{
+func TestServeConfigJSON(t *testing.T) {
+cfg := &ServeConfig{
+Services: map[string]*ServiceConfig{
 "svc:myapp": {
-Endpoints:  map[string]string{"tcp:443": "http://localhost:3000"},
-Advertised: true,
+TCP: map[uint16]*TCPPortHandler{
+443: {TCPForward: "localhost:3000"},
+},
 },
 },
 }
@@ -150,37 +136,42 @@ t.Fatal(err)
 }
 
 jsonStr := string(data)
-if !contains(jsonStr, `"version":"0.0.1"`) {
-t.Error("expected version in JSON")
-}
 if !contains(jsonStr, `"svc:myapp"`) {
 t.Error("expected svc:myapp in JSON")
 }
-if !contains(jsonStr, `"tcp:443"`) {
-t.Error("expected tcp:443 in JSON")
+if !contains(jsonStr, `"TCPForward"`) {
+t.Error("expected TCPForward in JSON")
+}
+if !contains(jsonStr, `"localhost:3000"`) {
+t.Error("expected backend addr in JSON")
+}
+// Must NOT contain version (old format artifact)
+if contains(jsonStr, `"version"`) {
+t.Error("unexpected version field in JSON")
 }
 
 // Round-trip
-var decoded ServicesConfig
+var decoded ServeConfig
 if err := json.Unmarshal(data, &decoded); err != nil {
 t.Fatal(err)
 }
-if decoded.Version != "0.0.1" {
-t.Error("version should survive round-trip")
+svcCfg := decoded.Services["svc:myapp"]
+if svcCfg == nil {
+t.Fatal("svc:myapp missing after round-trip")
 }
-svcDef := decoded.Services["svc:myapp"]
-if svcDef == nil || svcDef.Endpoints["tcp:443"] != "http://localhost:3000" {
-t.Error("endpoint should survive round-trip")
+handler := svcCfg.TCP[443]
+if handler == nil || handler.TCPForward != "localhost:3000" {
+t.Error("TCPForward should survive round-trip")
 }
 }
 
 func TestApply_SkipsWhenUnchanged(t *testing.T) {
-existingConfig := &ServicesConfig{
-Version: "0.0.1",
-Services: map[string]*ServiceDef{
+existingConfig := &ServeConfig{
+Services: map[string]*ServiceConfig{
 "svc:myapp": {
-Endpoints:  map[string]string{"tcp:443": "http://myapp:3000"},
-Advertised: true,
+TCP: map[uint16]*TCPPortHandler{
+443: {TCPForward: "myapp:3000"},
+},
 },
 },
 }
@@ -217,13 +208,13 @@ t.Error("expected POST to be skipped when config is unchanged")
 }
 
 func TestApply_PostsWhenChanged(t *testing.T) {
-var postedConfig ServicesConfig
+var postedConfig ServeConfig
 postCalled := false
 
 mux := http.NewServeMux()
 mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
 if r.Method == http.MethodGet {
-json.NewEncoder(w).Encode(&ServicesConfig{Version: "0.0.1"})
+json.NewEncoder(w).Encode(&ServeConfig{})
 return
 }
 postCalled = true
@@ -251,12 +242,13 @@ if !postCalled {
 t.Fatal("expected POST to be called when config changes")
 }
 
-svcDef, ok := postedConfig.Services["svc:sonarr"]
+svcCfg, ok := postedConfig.Services["svc:sonarr"]
 if !ok {
 t.Fatal("expected svc:sonarr in posted config")
 }
-if svcDef.Endpoints["tcp:443"] != "http://sonarr:8989" {
-t.Errorf("endpoint = %q, want %q", svcDef.Endpoints["tcp:443"], "http://sonarr:8989")
+handler := svcCfg.TCP[443]
+if handler == nil || handler.TCPForward != "sonarr:8989" {
+t.Errorf("TCPForward = %q, want %q", handler.TCPForward, "sonarr:8989")
 }
 }
 
@@ -288,7 +280,7 @@ func TestApply_HandlesPostError(t *testing.T) {
 mux := http.NewServeMux()
 mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
 if r.Method == http.MethodGet {
-json.NewEncoder(w).Encode(&ServicesConfig{Version: "0.0.1"})
+json.NewEncoder(w).Encode(&ServeConfig{})
 return
 }
 w.WriteHeader(http.StatusConflict)
