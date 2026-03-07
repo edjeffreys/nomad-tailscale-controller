@@ -7,7 +7,7 @@ A lightweight controller that watches Nomad services and dynamically manages a T
 1. The controller watches the Nomad event stream (with polling fallback) for services tagged with `tailscale.*`
 2. When it finds services with `tailscale.enable=true`, it builds a Tailscale serve config
 3. It applies the config via `tailscale serve --config` on the ingress node
-4. One Tailscale node (`arr-ingress`) serves all your private services — rather than a sidecar per service
+4. One Tailscale node (`tailscale-ingress`) serves all your private services — rather than a sidecar per service
 
 ## Service tags
 
