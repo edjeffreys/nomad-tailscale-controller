@@ -5,7 +5,7 @@ COPY go.mod ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o controller ./cmd/controller
+RUN CGO_ENABLED=0 GOOS=linux go build -o controller .
 
 FROM alpine:3.19
 
