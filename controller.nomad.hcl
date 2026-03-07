@@ -72,7 +72,7 @@ EOF
       env {
         NOMAD_ADDR        = "http://172.17.0.1:4646"
         TAILNET           = "tail5f17e.ts.net"
-        NOMAD_NAMESPACES  = "arr"
+        NOMAD_NAMESPACES  = "*"
         POLL_INTERVAL     = "30s"
         TAG_PREFIX        = "tailscale."
         TAILSCALE_SOCKET  = "/alloc/tmp/tailscaled.sock"

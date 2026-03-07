@@ -104,7 +104,9 @@ func (w *Watcher) watchEvents(ctx context.Context) <-chan error {
 			nomadapi.TopicService: {"*"},
 		}
 
-		eventCh, err := w.nomad.EventStream().Stream(ctx, topics, 0, nil)
+		eventCh, err := w.nomad.EventStream().Stream(ctx, topics, 0, &nomadapi.QueryOptions{
+			Namespace: "*",
+		})
 		if err != nil {
 			ch <- fmt.Errorf("failed to subscribe to event stream: %w", err)
 			return
