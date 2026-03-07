@@ -1,4 +1,4 @@
-package nomad
+package watcher
 
 import (
 	"testing"
@@ -64,6 +64,17 @@ func TestParseTags(t *testing.T) {
 			tags:   []string{"tailscale.enable=false"},
 			prefix: "tailscale.",
 			want:   map[string]string{"enable": "false"},
+		},
+		{
+			name:   "mixed traefik and tailscale tags",
+			tags: []string{
+				"traefik.enable=true",
+				"traefik.http.routers.mealie.rule=Host(`mealie.skaal.dev`)",
+				"tailscale.enable=true",
+				"tailscale.hostname=mealie",
+			},
+			prefix: "tailscale.",
+			want:   map[string]string{"enable": "true", "hostname": "mealie"},
 		},
 	}
 

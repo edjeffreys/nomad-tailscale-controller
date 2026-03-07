@@ -7,8 +7,8 @@ import (
 	"syscall"
 
 	"github.com/edjeffreys/nomad-tailscale-controller/internal/config"
-	"github.com/edjeffreys/nomad-tailscale-controller/internal/nomad"
 	"github.com/edjeffreys/nomad-tailscale-controller/internal/tailscale"
+	"github.com/edjeffreys/nomad-tailscale-controller/internal/watcher"
 	"go.uber.org/zap"
 )
 
@@ -25,15 +25,15 @@ func main() {
 	defer cancel()
 
 	tsClient := tailscale.NewClient(cfg.TailscaleSocket, logger)
-	nomadWatcher := nomad.NewWatcher(cfg, tsClient, logger)
+	w := watcher.NewWatcher(cfg, tsClient, logger)
 
 	logger.Info("starting nomad-tailscale-controller",
-		zap.String("nomad_addr", cfg.NomadAddr),
+		zap.String("consul_addr", cfg.ConsulAddr),
 		zap.String("tailnet", cfg.Tailnet),
 		zap.Duration("poll_interval", cfg.PollInterval),
 	)
 
-	if err := nomadWatcher.Run(ctx); err != nil {
+	if err := w.Run(ctx); err != nil {
 		logger.Fatal("controller exited with error", zap.Error(err))
 	}
 
