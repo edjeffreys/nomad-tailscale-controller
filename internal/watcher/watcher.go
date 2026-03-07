@@ -18,6 +18,7 @@ const (
 	tagHostname = "hostname"
 	tagPort     = "port"
 	tagBackend  = "backend"
+	tagTag      = "tag"
 )
 
 // Watcher watches Consul for services tagged with tailscale. tags
@@ -25,11 +26,12 @@ const (
 type Watcher struct {
 	cfg    *config.Config
 	ts     *tailscale.Client
+	api    *tailscale.APIClient // nil if no OAuth creds configured
 	logger *zap.Logger
 	consul *consulapi.Client
 }
 
-func NewWatcher(cfg *config.Config, ts *tailscale.Client, logger *zap.Logger) *Watcher {
+func NewWatcher(cfg *config.Config, ts *tailscale.Client, api *tailscale.APIClient, logger *zap.Logger) *Watcher {
 	consulCfg := consulapi.DefaultConfig()
 	if cfg.ConsulAddr != "" {
 		consulCfg.Address = cfg.ConsulAddr
@@ -46,6 +48,7 @@ func NewWatcher(cfg *config.Config, ts *tailscale.Client, logger *zap.Logger) *W
 	return &Watcher{
 		cfg:    cfg,
 		ts:     ts,
+		api:    api,
 		logger: logger,
 		consul: client,
 	}
@@ -136,7 +139,7 @@ func (w *Watcher) watchCatalog(ctx context.Context) <-chan error {
 }
 
 // reconcile fetches all services from Consul, filters for tailscale-tagged ones,
-// and applies the serve config.
+// ensures they exist in the Tailscale control plane, and applies the serve config.
 func (w *Watcher) reconcile(ctx context.Context) error {
 	services, err := w.fetchServices(ctx)
 	if err != nil {
@@ -148,10 +151,66 @@ func (w *Watcher) reconcile(ctx context.Context) error {
 		w.logger.Debug("found tailscale service",
 			zap.String("hostname", svc.Hostname),
 			zap.String("backend", svc.BackendAddr),
+			zap.Int("port", svc.Port),
+			zap.String("tag", svc.Tag),
 		)
 	}
 
+	// Ensure service definitions exist in the control plane (if API client is configured)
+	if w.api != nil {
+		if err := w.ensureAPIServices(ctx, services); err != nil {
+			w.logger.Error("failed to ensure API services", zap.Error(err))
+			// Continue to apply local config even if API calls fail
+		}
+	}
+
 	return w.ts.Apply(services)
+}
+
+// ensureAPIServices creates or updates Tailscale Service definitions via the control plane API.
+// Only creates services that don't already exist to minimize API calls.
+func (w *Watcher) ensureAPIServices(ctx context.Context, services []tailscale.Service) error {
+	existing, err := w.api.ListServices(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list existing services: %w", err)
+	}
+
+	existingNames := make(map[string]bool, len(existing))
+	for _, svc := range existing {
+		existingNames[svc.Name] = true
+	}
+
+	for _, svc := range services {
+		svcName := fmt.Sprintf("svc:%s", svc.Hostname)
+		if existingNames[svcName] {
+			w.logger.Debug("service already exists in control plane", zap.String("service", svcName))
+			continue
+		}
+
+		port := svc.Port
+		if port == 0 {
+			port = 443
+		}
+
+		apiSvc := tailscale.VIPService{
+			Name:    svcName,
+			Comment: "Managed by nomad-tailscale-controller",
+			Ports:   []string{fmt.Sprintf("tcp:%d", port)},
+			Annotations: map[string]string{
+				"nomad-tailscale-controller/managed": "true",
+			},
+		}
+		if svc.Tag != "" {
+			apiSvc.Tags = []string{svc.Tag}
+		}
+
+		if err := w.api.EnsureService(ctx, apiSvc); err != nil {
+			w.logger.Error("failed to ensure service", zap.String("service", svcName), zap.Error(err))
+			continue
+		}
+	}
+
+	return nil
 }
 
 // fetchServices fetches all Consul services and returns those tagged with
@@ -192,6 +251,7 @@ func (w *Watcher) fetchServices(ctx context.Context) ([]tailscale.Service, error
 		}
 
 		backend := tags[tagBackend]
+		servicePort := 0
 		if backend == "" {
 			// Fetch service instances to get address and port
 			instances, _, err := w.consul.Catalog().Service(svcName, "", opts)
@@ -207,21 +267,31 @@ func (w *Watcher) fetchServices(ctx context.Context) ([]tailscale.Service, error
 			if addr == "" {
 				addr = inst.Address
 			}
-			backend = fmt.Sprintf("%s:%d", addr, inst.ServicePort)
+			servicePort = inst.ServicePort
+			backend = fmt.Sprintf("%s:%d", addr, servicePort)
 		}
 
-		port := 443
+		// Default frontend port to the Consul service's actual port, fall back to 443
+		port := servicePort
+		if port == 0 {
+			port = 443
+		}
 		if p := tags[tagPort]; p != "" {
 			if parsed, err := strconv.Atoi(p); err == nil {
 				port = parsed
 			}
 		}
 
+		tag := tags[tagTag]
+		if tag == "" {
+			tag = w.cfg.TSDefaultTag
+		}
+
 		result = append(result, tailscale.Service{
 			Hostname:    hostname,
-			Tailnet:     w.cfg.Tailnet,
 			BackendAddr: backend,
 			Port:        port,
+			Tag:         tag,
 		})
 	}
 

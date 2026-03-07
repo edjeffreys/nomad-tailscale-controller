@@ -1,454 +1,389 @@
 package tailscale
 
 import (
-	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"testing"
+"encoding/json"
+"io"
+"net/http"
+"net/http/httptest"
+"testing"
 
-	"go.uber.org/zap"
+"go.uber.org/zap"
 )
 
-func TestServiceFQDN(t *testing.T) {
-	s := &Service{Hostname: "myapp", Tailnet: "tail5f17e.ts.net"}
-	want := "myapp.tail5f17e.ts.net"
-	if got := s.FQDN(); got != want {
-		t.Errorf("FQDN() = %q, want %q", got, want)
-	}
-}
-
-func TestServiceServeKey(t *testing.T) {
-	tests := []struct {
-		name string
-		svc  Service
-		want string
-	}{
-		{
-			name: "default port",
-			svc:  Service{Hostname: "myapp", Tailnet: "tail5f17e.ts.net", Port: 0},
-			want: "myapp.tail5f17e.ts.net:443",
-		},
-		{
-			name: "explicit port 443",
-			svc:  Service{Hostname: "myapp", Tailnet: "tail5f17e.ts.net", Port: 443},
-			want: "myapp.tail5f17e.ts.net:443",
-		},
-		{
-			name: "custom port",
-			svc:  Service{Hostname: "myapp", Tailnet: "tail5f17e.ts.net", Port: 8443},
-			want: "myapp.tail5f17e.ts.net:8443",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.svc.ServeKey(); got != tt.want {
-				t.Errorf("ServeKey() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestServiceBackendURL(t *testing.T) {
-	s := &Service{BackendAddr: "sabnzbd.service.consul:8080"}
-	want := "http://sabnzbd.service.consul:8080"
-	if got := s.BackendURL(); got != want {
-		t.Errorf("BackendURL() = %q, want %q", got, want)
-	}
+s := &Service{BackendAddr: "sabnzbd.service.consul:8080"}
+want := "http://sabnzbd.service.consul:8080"
+if got := s.BackendURL(); got != want {
+t.Errorf("BackendURL() = %q, want %q", got, want)
+}
 }
 
-func TestBuildServeConfig_Empty(t *testing.T) {
-	logger := zap.NewNop()
-	c := &Client{logger: logger}
+func TestBuildServicesConfig_Empty(t *testing.T) {
+c := &Client{logger: zap.NewNop()}
+cfg := c.buildServicesConfig(nil)
 
-	cfg := c.buildServeConfig(nil)
-
-	if len(cfg.TCP) != 0 {
-		t.Errorf("expected empty TCP map, got %v", cfg.TCP)
-	}
-	if len(cfg.Web) != 0 {
-		t.Errorf("expected empty Web map, got %v", cfg.Web)
-	}
+if cfg.Version != "0.0.1" {
+t.Errorf("Version = %q, want 0.0.1", cfg.Version)
+}
+if len(cfg.Services) != 0 {
+t.Errorf("expected empty Services map, got %v", cfg.Services)
+}
 }
 
-func TestBuildServeConfig_SingleService(t *testing.T) {
-	logger := zap.NewNop()
-	c := &Client{logger: logger}
+func TestBuildServicesConfig_SingleService(t *testing.T) {
+c := &Client{logger: zap.NewNop()}
 
-	services := []Service{
-		{
-			Hostname:    "sonarr",
-			Tailnet:     "tail5f17e.ts.net",
-			BackendAddr: "sonarr.service.consul:8989",
-			Port:        443,
-		},
-	}
-
-	cfg := c.buildServeConfig(services)
-
-	// TCP: port 443 with HTTPS
-	tcp, ok := cfg.TCP["443"]
-	if !ok {
-		t.Fatal("expected TCP entry for port 443")
-	}
-	if !tcp.HTTPS {
-		t.Error("expected TCP[443].HTTPS = true")
-	}
-
-	// Web: hostname:port -> handler
-	webKey := "sonarr.tail5f17e.ts.net:443"
-	web, ok := cfg.Web[webKey]
-	if !ok {
-		t.Fatalf("expected Web entry for %q", webKey)
-	}
-	handler, ok := web.Handlers["/"]
-	if !ok {
-		t.Fatal("expected handler for /")
-	}
-	if handler.Proxy != "http://sonarr.service.consul:8989" {
-		t.Errorf("handler.Proxy = %q, want %q", handler.Proxy, "http://sonarr.service.consul:8989")
-	}
+services := []Service{
+{Hostname: "sonarr", BackendAddr: "sonarr.service.consul:8989", Port: 443},
 }
 
-func TestBuildServeConfig_MultipleServices(t *testing.T) {
-	logger := zap.NewNop()
-	c := &Client{logger: logger}
+cfg := c.buildServicesConfig(services)
 
-	services := []Service{
-		{Hostname: "sonarr", Tailnet: "tail5f17e.ts.net", BackendAddr: "sonarr:8989", Port: 443},
-		{Hostname: "radarr", Tailnet: "tail5f17e.ts.net", BackendAddr: "radarr:7878", Port: 443},
-	}
-
-	cfg := c.buildServeConfig(services)
-
-	if len(cfg.TCP) != 1 {
-		t.Errorf("expected 1 TCP entry (both on 443), got %d", len(cfg.TCP))
-	}
-	if len(cfg.Web) != 2 {
-		t.Errorf("expected 2 Web entries, got %d", len(cfg.Web))
-	}
+svcDef, ok := cfg.Services["svc:sonarr"]
+if !ok {
+t.Fatal("expected service entry for svc:sonarr")
+}
+if !svcDef.Advertised {
+t.Error("expected Advertised = true")
+}
+target, ok := svcDef.Endpoints["tcp:443"]
+if !ok {
+t.Fatal("expected endpoint for tcp:443")
+}
+if target != "http://sonarr.service.consul:8989" {
+t.Errorf("endpoint target = %q, want %q", target, "http://sonarr.service.consul:8989")
+}
 }
 
-func TestBuildServeConfig_CustomPort(t *testing.T) {
-	logger := zap.NewNop()
-	c := &Client{logger: logger}
+func TestBuildServicesConfig_MultipleServices(t *testing.T) {
+c := &Client{logger: zap.NewNop()}
 
-	services := []Service{
-		{Hostname: "myapp", Tailnet: "tail5f17e.ts.net", BackendAddr: "myapp:3000", Port: 8443},
-	}
-
-	cfg := c.buildServeConfig(services)
-
-	if _, ok := cfg.TCP["8443"]; !ok {
-		t.Error("expected TCP entry for port 8443")
-	}
-	if _, ok := cfg.Web["myapp.tail5f17e.ts.net:8443"]; !ok {
-		t.Error("expected Web entry for myapp.tail5f17e.ts.net:8443")
-	}
+services := []Service{
+{Hostname: "sonarr", BackendAddr: "sonarr:8989", Port: 443},
+{Hostname: "radarr", BackendAddr: "radarr:7878", Port: 443},
 }
 
-func TestBuildServeConfig_ZeroPortDefaultsTo443(t *testing.T) {
-	logger := zap.NewNop()
-	c := &Client{logger: logger}
+cfg := c.buildServicesConfig(services)
 
-	services := []Service{
-		{Hostname: "myapp", Tailnet: "tail5f17e.ts.net", BackendAddr: "myapp:3000", Port: 0},
-	}
+if len(cfg.Services) != 2 {
+t.Errorf("expected 2 services, got %d", len(cfg.Services))
+}
+if _, ok := cfg.Services["svc:sonarr"]; !ok {
+t.Error("missing svc:sonarr")
+}
+if _, ok := cfg.Services["svc:radarr"]; !ok {
+t.Error("missing svc:radarr")
+}
+}
 
-	cfg := c.buildServeConfig(services)
+func TestBuildServicesConfig_CustomPort(t *testing.T) {
+c := &Client{logger: zap.NewNop()}
 
-	if _, ok := cfg.TCP["443"]; !ok {
-		t.Error("expected TCP entry for port 443 when Port=0")
-	}
+services := []Service{
+{Hostname: "myapp", BackendAddr: "myapp:3000", Port: 8443},
+}
+
+cfg := c.buildServicesConfig(services)
+
+svcDef := cfg.Services["svc:myapp"]
+if _, ok := svcDef.Endpoints["tcp:8443"]; !ok {
+t.Error("expected endpoint for tcp:8443")
+}
+}
+
+func TestBuildServicesConfig_ZeroPortDefaultsTo443(t *testing.T) {
+c := &Client{logger: zap.NewNop()}
+
+services := []Service{
+{Hostname: "myapp", BackendAddr: "myapp:3000", Port: 0},
+}
+
+cfg := c.buildServicesConfig(services)
+
+svcDef := cfg.Services["svc:myapp"]
+if _, ok := svcDef.Endpoints["tcp:443"]; !ok {
+t.Error("expected endpoint for tcp:443 when Port=0")
+}
 }
 
 func TestNormalizeConfig(t *testing.T) {
-	cfg := &ServeConfig{}
-	if cfg.TCP != nil || cfg.Web != nil {
-		t.Fatal("precondition: maps should be nil")
-	}
+cfg := &ServicesConfig{}
+if cfg.Services != nil {
+t.Fatal("precondition: Services should be nil")
+}
 
-	normalizeConfig(cfg)
+normalizeConfig(cfg)
 
-	if cfg.TCP == nil {
-		t.Error("expected TCP to be non-nil after normalize")
-	}
-	if cfg.Web == nil {
-		t.Error("expected Web to be non-nil after normalize")
-	}
+if cfg.Services == nil {
+t.Error("expected Services to be non-nil after normalize")
+}
 }
 
 func TestNormalizeConfig_AlreadyInitialized(t *testing.T) {
-	cfg := &ServeConfig{
-		TCP: map[string]TCPConfig{"443": {HTTPS: true}},
-		Web: map[string]WebConfig{},
-	}
-
-	normalizeConfig(cfg)
-
-	if len(cfg.TCP) != 1 {
-		t.Error("normalize should not clear existing TCP entries")
-	}
+cfg := &ServicesConfig{
+Services: map[string]*ServiceDef{
+"svc:test": {Endpoints: map[string]string{"tcp:443": "http://test:80"}, Advertised: true},
+},
 }
 
-func TestServeConfigJSON(t *testing.T) {
-	cfg := &ServeConfig{
-		TCP: map[string]TCPConfig{"443": {HTTPS: true}},
-		Web: map[string]WebConfig{
-			"myapp.tail5f17e.ts.net:443": {
-				Handlers: map[string]Handler{
-					"/": {Proxy: "http://localhost:3000"},
-				},
-			},
-		},
-		ETag: "should-not-appear",
-	}
+normalizeConfig(cfg)
 
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// ETag should be excluded from JSON (json:"-")
-	jsonStr := string(data)
-	if contains(jsonStr, "should-not-appear") {
-		t.Error("ETag should not appear in JSON output")
-	}
-	if !contains(jsonStr, `"TCP"`) {
-		t.Error("expected TCP key in JSON")
-	}
-	if !contains(jsonStr, `"HTTPS":true`) {
-		t.Error("expected HTTPS:true in JSON")
-	}
-
-	// Round-trip
-	var decoded ServeConfig
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded.ETag != "" {
-		t.Error("ETag should be empty after JSON round-trip")
-	}
-	if !decoded.TCP["443"].HTTPS {
-		t.Error("TCP[443].HTTPS should be true after round-trip")
-	}
+if len(cfg.Services) != 1 {
+t.Error("normalize should not clear existing services")
+}
 }
 
-// newTestClient creates a Client backed by an httptest server for the local API.
-func newTestClient(t *testing.T, handler http.Handler) *Client {
-	t.Helper()
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
-	return &Client{
-		logger: zap.NewNop(),
-		http:   srv.Client(),
-		socket: srv.URL, // not a real socket, but the http.Client routes to the test server
-	}
+func TestServicesConfigJSON(t *testing.T) {
+cfg := &ServicesConfig{
+Version: "0.0.1",
+Services: map[string]*ServiceDef{
+"svc:myapp": {
+Endpoints:  map[string]string{"tcp:443": "http://localhost:3000"},
+Advertised: true,
+},
+},
+}
+
+data, err := json.Marshal(cfg)
+if err != nil {
+t.Fatal(err)
+}
+
+jsonStr := string(data)
+if !contains(jsonStr, `"version":"0.0.1"`) {
+t.Error("expected version in JSON")
+}
+if !contains(jsonStr, `"svc:myapp"`) {
+t.Error("expected svc:myapp in JSON")
+}
+if !contains(jsonStr, `"tcp:443"`) {
+t.Error("expected tcp:443 in JSON")
+}
+
+// Round-trip
+var decoded ServicesConfig
+if err := json.Unmarshal(data, &decoded); err != nil {
+t.Fatal(err)
+}
+if decoded.Version != "0.0.1" {
+t.Error("version should survive round-trip")
+}
+svcDef := decoded.Services["svc:myapp"]
+if svcDef == nil || svcDef.Endpoints["tcp:443"] != "http://localhost:3000" {
+t.Error("endpoint should survive round-trip")
+}
 }
 
 func TestApply_SkipsWhenUnchanged(t *testing.T) {
-	existingConfig := &ServeConfig{
-		TCP: map[string]TCPConfig{"443": {HTTPS: true}},
-		Web: map[string]WebConfig{
-			"myapp.tail5f17e.ts.net:443": {
-				Handlers: map[string]Handler{"/": {Proxy: "http://myapp:3000"}},
-			},
-		},
-	}
+existingConfig := &ServicesConfig{
+Version: "0.0.1",
+Services: map[string]*ServiceDef{
+"svc:myapp": {
+Endpoints:  map[string]string{"tcp:443": "http://myapp:3000"},
+Advertised: true,
+},
+},
+}
 
-	postCalled := false
-	mux := http.NewServeMux()
-	mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			w.Header().Set("Etag", `"abc123"`)
-			json.NewEncoder(w).Encode(existingConfig)
-			return
-		}
-		postCalled = true
-		w.WriteHeader(http.StatusOK)
-	})
+postCalled := false
+mux := http.NewServeMux()
+mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
+if r.Method == http.MethodGet {
+json.NewEncoder(w).Encode(existingConfig)
+return
+}
+postCalled = true
+w.WriteHeader(http.StatusOK)
+})
 
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
+srv := httptest.NewServer(mux)
+t.Cleanup(srv.Close)
 
-	c := &Client{
-		logger: zap.NewNop(),
-		http:   srv.Client(),
-	}
-	// Override the localAPIBase by wrapping the client's http transport
-	origGet := c.getConfig
-	_ = origGet
-	// Simpler: just override the const by making the client talk to the test server
-	c.http.Transport = &rewriteTransport{base: srv.Client().Transport, target: srv.URL}
+c := &Client{
+logger: zap.NewNop(),
+http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
+}
 
-	services := []Service{
-		{Hostname: "myapp", Tailnet: "tail5f17e.ts.net", BackendAddr: "myapp:3000", Port: 443},
-	}
+services := []Service{
+{Hostname: "myapp", BackendAddr: "myapp:3000", Port: 443},
+}
 
-	if err := c.Apply(services); err != nil {
-		t.Fatal(err)
-	}
-	if postCalled {
-		t.Error("expected POST to be skipped when config is unchanged")
-	}
+if err := c.Apply(services); err != nil {
+t.Fatal(err)
+}
+if postCalled {
+t.Error("expected POST to be skipped when config is unchanged")
+}
 }
 
 func TestApply_PostsWhenChanged(t *testing.T) {
-	var postedConfig ServeConfig
-	postCalled := false
+var postedConfig ServicesConfig
+postCalled := false
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			w.Header().Set("Etag", `"v1"`)
-			// Return empty config
-			json.NewEncoder(w).Encode(&ServeConfig{})
-			return
-		}
-		postCalled = true
-		body, _ := io.ReadAll(r.Body)
-		json.Unmarshal(body, &postedConfig)
+mux := http.NewServeMux()
+mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
+if r.Method == http.MethodGet {
+json.NewEncoder(w).Encode(&ServicesConfig{Version: "0.0.1"})
+return
+}
+postCalled = true
+body, _ := io.ReadAll(r.Body)
+json.Unmarshal(body, &postedConfig)
+w.WriteHeader(http.StatusOK)
+})
 
-		if r.Header.Get("If-Match") != `"v1"` {
-			t.Errorf("expected If-Match header %q, got %q", `"v1"`, r.Header.Get("If-Match"))
-		}
-		w.WriteHeader(http.StatusOK)
-	})
+srv := httptest.NewServer(mux)
+t.Cleanup(srv.Close)
 
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
+c := &Client{
+logger: zap.NewNop(),
+http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
+}
 
-	c := &Client{
-		logger: zap.NewNop(),
-		http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
-	}
+services := []Service{
+{Hostname: "sonarr", BackendAddr: "sonarr:8989", Port: 443},
+}
 
-	services := []Service{
-		{Hostname: "sonarr", Tailnet: "tail5f17e.ts.net", BackendAddr: "sonarr:8989", Port: 443},
-	}
+if err := c.Apply(services); err != nil {
+t.Fatal(err)
+}
+if !postCalled {
+t.Fatal("expected POST to be called when config changes")
+}
 
-	if err := c.Apply(services); err != nil {
-		t.Fatal(err)
-	}
-	if !postCalled {
-		t.Fatal("expected POST to be called when config changes")
-	}
-
-	if !postedConfig.TCP["443"].HTTPS {
-		t.Error("expected posted config to have TCP[443].HTTPS=true")
-	}
-	web, ok := postedConfig.Web["sonarr.tail5f17e.ts.net:443"]
-	if !ok {
-		t.Fatal("expected posted config to have Web entry for sonarr")
-	}
-	if web.Handlers["/"].Proxy != "http://sonarr:8989" {
-		t.Errorf("Proxy = %q, want %q", web.Handlers["/"].Proxy, "http://sonarr:8989")
-	}
+svcDef, ok := postedConfig.Services["svc:sonarr"]
+if !ok {
+t.Fatal("expected svc:sonarr in posted config")
+}
+if svcDef.Endpoints["tcp:443"] != "http://sonarr:8989" {
+t.Errorf("endpoint = %q, want %q", svcDef.Endpoints["tcp:443"], "http://sonarr:8989")
+}
 }
 
 func TestApply_HandlesGetError(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal error"))
-	})
+mux := http.NewServeMux()
+mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
+w.WriteHeader(http.StatusInternalServerError)
+w.Write([]byte("internal error"))
+})
 
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
+srv := httptest.NewServer(mux)
+t.Cleanup(srv.Close)
 
-	c := &Client{
-		logger: zap.NewNop(),
-		http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
-	}
+c := &Client{
+logger: zap.NewNop(),
+http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
+}
 
-	err := c.Apply([]Service{{Hostname: "test", Tailnet: "test.ts.net", BackendAddr: "test:80"}})
-	if err == nil {
-		t.Fatal("expected error when GET fails")
-	}
-	if !contains(err.Error(), "500") {
-		t.Errorf("error should mention status code, got: %s", err)
-	}
+err := c.Apply([]Service{{Hostname: "test", BackendAddr: "test:80"}})
+if err == nil {
+t.Fatal("expected error when GET fails")
+}
+if !contains(err.Error(), "500") {
+t.Errorf("error should mention status code, got: %s", err)
+}
 }
 
 func TestApply_HandlesPostError(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			json.NewEncoder(w).Encode(&ServeConfig{})
-			return
-		}
-		w.WriteHeader(http.StatusConflict)
-		w.Write([]byte("etag mismatch"))
-	})
+mux := http.NewServeMux()
+mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
+if r.Method == http.MethodGet {
+json.NewEncoder(w).Encode(&ServicesConfig{Version: "0.0.1"})
+return
+}
+w.WriteHeader(http.StatusConflict)
+w.Write([]byte("conflict"))
+})
 
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
+srv := httptest.NewServer(mux)
+t.Cleanup(srv.Close)
 
-	c := &Client{
-		logger: zap.NewNop(),
-		http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
-	}
+c := &Client{
+logger: zap.NewNop(),
+http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
+}
 
-	err := c.Apply([]Service{{Hostname: "test", Tailnet: "test.ts.net", BackendAddr: "test:80"}})
-	if err == nil {
-		t.Fatal("expected error when POST returns conflict")
-	}
-	if !contains(err.Error(), "409") {
-		t.Errorf("error should mention 409, got: %s", err)
-	}
+err := c.Apply([]Service{{Hostname: "test", BackendAddr: "test:80"}})
+if err == nil {
+t.Fatal("expected error when POST returns conflict")
+}
+if !contains(err.Error(), "409") {
+t.Errorf("error should mention 409, got: %s", err)
+}
 }
 
 func TestApply_EmptyServicesNoopWhenAlreadyEmpty(t *testing.T) {
-	postCalled := false
-	mux := http.NewServeMux()
-	mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			// Return null/empty — after normalize this becomes empty maps
-			w.Write([]byte("{}"))
-			return
-		}
-		postCalled = true
-		w.WriteHeader(http.StatusOK)
-	})
+postCalled := false
+mux := http.NewServeMux()
+mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
+if r.Method == http.MethodGet {
+w.Write([]byte("{}"))
+return
+}
+postCalled = true
+w.WriteHeader(http.StatusOK)
+})
 
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
+srv := httptest.NewServer(mux)
+t.Cleanup(srv.Close)
 
-	c := &Client{
-		logger: zap.NewNop(),
-		http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
-	}
+c := &Client{
+logger: zap.NewNop(),
+http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
+}
 
-	if err := c.Apply(nil); err != nil {
-		t.Fatal(err)
-	}
-	if postCalled {
-		t.Error("POST should not be called when both current and desired are empty")
-	}
+if err := c.Apply(nil); err != nil {
+t.Fatal(err)
+}
+if postCalled {
+t.Error("POST should not be called when both current and desired are empty")
+}
+}
+
+func TestGetConfig_Handles404AsEmpty(t *testing.T) {
+mux := http.NewServeMux()
+mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
+w.WriteHeader(http.StatusNotFound)
+})
+
+srv := httptest.NewServer(mux)
+t.Cleanup(srv.Close)
+
+c := &Client{
+logger: zap.NewNop(),
+http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
+}
+
+cfg, err := c.getConfig()
+if err != nil {
+t.Fatal(err)
+}
+if cfg.Services == nil {
+t.Error("expected non-nil Services on 404")
+}
+if len(cfg.Services) != 0 {
+t.Errorf("expected empty Services on 404, got %d", len(cfg.Services))
+}
 }
 
 // rewriteTransport rewrites requests to localAPIBase to point at the test server.
 type rewriteTransport struct {
-	base   http.RoundTripper
-	target string
+base   http.RoundTripper
+target string
 }
 
 func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	req = req.Clone(req.Context())
-	req.URL.Scheme = "http"
-	req.URL.Host = t.target[len("http://"):]
-	return t.base.RoundTrip(req)
+req = req.Clone(req.Context())
+req.URL.Scheme = "http"
+req.URL.Host = t.target[len("http://"):]
+return t.base.RoundTrip(req)
 }
 
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
+for i := 0; i <= len(s)-len(substr); i++ {
+if s[i:i+len(substr)] == substr {
+return true
 }
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+}
+return false
 }

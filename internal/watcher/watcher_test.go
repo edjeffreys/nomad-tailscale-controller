@@ -76,6 +76,12 @@ func TestParseTags(t *testing.T) {
 			prefix: "tailscale.",
 			want:   map[string]string{"enable": "true", "hostname": "mealie"},
 		},
+		{
+			name:   "tag override",
+			tags:   []string{"tailscale.enable=true", "tailscale.tag=tag:web"},
+			prefix: "tailscale.",
+			want:   map[string]string{"enable": "true", "tag": "tag:web"},
+		},
 	}
 
 	for _, tt := range tests {

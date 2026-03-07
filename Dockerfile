@@ -9,8 +9,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o controller .
 
 FROM alpine:3.19
 
-# Install tailscale CLI so the controller can run `tailscale serve --config`
-RUN apk add --no-cache tailscale ca-certificates
+RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /app/controller /usr/local/bin/controller
 

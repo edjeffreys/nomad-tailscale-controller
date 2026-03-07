@@ -29,7 +29,16 @@ func main() {
 	defer cancel()
 
 	tsClient := tailscale.NewClient(cfg.TailscaleSocket, logger)
-	w := watcher.NewWatcher(cfg, tsClient, logger)
+
+	var apiClient *tailscale.APIClient
+	if cfg.TSOAuthClientID != "" && cfg.TSOAuthClientSecret != "" {
+		apiClient = tailscale.NewAPIClient(cfg.Tailnet, cfg.TSOAuthClientID, cfg.TSOAuthClientSecret, logger)
+		logger.Info("tailscale API client enabled (auto-create services)")
+	} else {
+		logger.Info("tailscale API client disabled (no OAuth credentials)")
+	}
+
+	w := watcher.NewWatcher(cfg, tsClient, apiClient, logger)
 
 	logger.Info("starting nomad-tailscale-controller",
 		zap.String("consul_addr", cfg.ConsulAddr),

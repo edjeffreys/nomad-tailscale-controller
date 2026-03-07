@@ -22,6 +22,18 @@ type Config struct {
 	// Defaults to /var/run/tailscale/tailscaled.sock
 	TailscaleSocket string
 
+	// TSOAuthClientID is the OAuth2 client ID for the Tailscale API.
+	// When set (with TSOAuthClientSecret), the controller will auto-create
+	// service definitions in the Tailscale control plane.
+	TSOAuthClientID string
+
+	// TSOAuthClientSecret is the OAuth2 client secret for the Tailscale API.
+	TSOAuthClientSecret string
+
+	// TSDefaultTag is the Tailscale ACL tag applied to auto-created services.
+	// Defaults to "tag:server". Can be overridden per-service via tailscale.tag= Consul tag.
+	TSDefaultTag string
+
 	// PollInterval is how often to poll Consul for service changes.
 	// Defaults to 10s. Consul blocking queries are also used for immediate updates.
 	PollInterval time.Duration
@@ -33,11 +45,14 @@ type Config struct {
 
 func FromEnv() (*Config, error) {
 	cfg := &Config{
-		ConsulAddr:      getEnvOrDefault("CONSUL_HTTP_ADDR", "http://localhost:8500"),
-		ConsulToken:     os.Getenv("CONSUL_HTTP_TOKEN"),
-		Tailnet:         os.Getenv("TAILNET"),
-		TailscaleSocket: getEnvOrDefault("TAILSCALE_SOCKET", "/var/run/tailscale/tailscaled.sock"),
-		TagPrefix:       getEnvOrDefault("TAG_PREFIX", "tailscale."),
+		ConsulAddr:          getEnvOrDefault("CONSUL_HTTP_ADDR", "http://localhost:8500"),
+		ConsulToken:         os.Getenv("CONSUL_HTTP_TOKEN"),
+		Tailnet:             os.Getenv("TAILNET"),
+		TailscaleSocket:     getEnvOrDefault("TAILSCALE_SOCKET", "/var/run/tailscale/tailscaled.sock"),
+		TSOAuthClientID:     os.Getenv("TS_OAUTH_CLIENT_ID"),
+		TSOAuthClientSecret: os.Getenv("TS_OAUTH_CLIENT_SECRET"),
+		TSDefaultTag:        getEnvOrDefault("TS_DEFAULT_TAG", "tag:server"),
+		TagPrefix:           getEnvOrDefault("TAG_PREFIX", "tailscale."),
 	}
 
 	pollInterval := getEnvOrDefault("POLL_INTERVAL", "10s")

@@ -37,6 +37,9 @@ unsetEnv(t, "CONSUL_HTTP_TOKEN")
 unsetEnv(t, "TAILSCALE_SOCKET")
 unsetEnv(t, "TAG_PREFIX")
 unsetEnv(t, "POLL_INTERVAL")
+unsetEnv(t, "TS_OAUTH_CLIENT_ID")
+unsetEnv(t, "TS_OAUTH_CLIENT_SECRET")
+unsetEnv(t, "TS_DEFAULT_TAG")
 
 cfg, err := FromEnv()
 if err != nil {
@@ -55,6 +58,12 @@ t.Errorf("TagPrefix = %q, want default", cfg.TagPrefix)
 if cfg.PollInterval != 10*time.Second {
 t.Errorf("PollInterval = %v, want 10s", cfg.PollInterval)
 }
+if cfg.TSDefaultTag != "tag:server" {
+t.Errorf("TSDefaultTag = %q, want tag:server", cfg.TSDefaultTag)
+}
+if cfg.TSOAuthClientID != "" {
+t.Errorf("TSOAuthClientID = %q, want empty", cfg.TSOAuthClientID)
+}
 }
 
 func TestFromEnv_CustomValues(t *testing.T) {
@@ -64,6 +73,9 @@ setEnv(t, "CONSUL_HTTP_TOKEN", "secret-token")
 setEnv(t, "TAILSCALE_SOCKET", "/tmp/ts.sock")
 setEnv(t, "TAG_PREFIX", "ts.")
 setEnv(t, "POLL_INTERVAL", "30s")
+setEnv(t, "TS_OAUTH_CLIENT_ID", "my-client-id")
+setEnv(t, "TS_OAUTH_CLIENT_SECRET", "my-client-secret")
+setEnv(t, "TS_DEFAULT_TAG", "tag:custom")
 
 cfg, err := FromEnv()
 if err != nil {
@@ -87,6 +99,15 @@ t.Errorf("TagPrefix = %q", cfg.TagPrefix)
 }
 if cfg.PollInterval != 30*time.Second {
 t.Errorf("PollInterval = %v", cfg.PollInterval)
+}
+if cfg.TSOAuthClientID != "my-client-id" {
+t.Errorf("TSOAuthClientID = %q", cfg.TSOAuthClientID)
+}
+if cfg.TSOAuthClientSecret != "my-client-secret" {
+t.Errorf("TSOAuthClientSecret = %q", cfg.TSOAuthClientSecret)
+}
+if cfg.TSDefaultTag != "tag:custom" {
+t.Errorf("TSDefaultTag = %q", cfg.TSDefaultTag)
 }
 }
 

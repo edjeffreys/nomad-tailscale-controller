@@ -75,6 +75,18 @@ EOF
         POLL_INTERVAL     = "30s"
         TAG_PREFIX        = "tailscale."
         TAILSCALE_SOCKET  = "/alloc/tmp/tailscaled.sock"
+        TS_DEFAULT_TAG    = "tag:server"
+      }
+
+      template {
+        data        = <<EOF
+{{ with nomadVar "nomad/jobs/tailscale-controller" }}
+TS_OAUTH_CLIENT_ID={{ .oauth_client_id | trimSpace }}
+TS_OAUTH_CLIENT_SECRET={{ .oauth_client_secret | trimSpace }}
+{{ end }}
+EOF
+        destination = "secrets/ts-oauth.env"
+        env         = true
       }
 
       resources {

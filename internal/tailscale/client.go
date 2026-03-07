@@ -13,47 +13,24 @@ import (
 	"go.uber.org/zap"
 )
 
-// ServeConfig mirrors the Tailscale serve config JSON format.
-type ServeConfig struct {
-	TCP  map[string]TCPConfig `json:"TCP,omitempty"`
-	Web  map[string]WebConfig `json:"Web,omitempty"`
-	ETag string               `json:"-"` // populated from response header, not the JSON body
+// ServicesConfig matches the Tailscale Services configuration file format.
+// See https://tailscale.com/docs/reference/tailscale-services-configuration-file
+type ServicesConfig struct {
+	Version  string                 `json:"version"`
+	Services map[string]*ServiceDef `json:"services,omitempty"`
 }
 
-type TCPConfig struct {
-	HTTPS bool `json:"HTTPS,omitempty"`
-}
-
-type WebConfig struct {
-	Handlers map[string]Handler `json:"Handlers"`
-}
-
-type Handler struct {
-	Proxy string `json:"Proxy"`
+// ServiceDef defines a single Tailscale Service with its endpoint mappings.
+type ServiceDef struct {
+	Endpoints  map[string]string `json:"endpoints"`
+	Advertised bool              `json:"advertised"`
 }
 
 type Service struct {
-	Hostname string
-
-	// Tailnet is the tailnet domain e.g. "tail5f17e.ts.net"
-	Tailnet string
-
-	// BackendAddr is the Consul DNS address and port e.g. "sabnzbd.service.consul:8080"
+	Hostname    string
 	BackendAddr string
-
-	Port int
-}
-
-func (s *Service) FQDN() string {
-	return fmt.Sprintf("%s.%s", s.Hostname, s.Tailnet)
-}
-
-func (s *Service) ServeKey() string {
-	port := s.Port
-	if port == 0 {
-		port = 443
-	}
-	return fmt.Sprintf("%s:%d", s.FQDN(), port)
+	Port        int
+	Tag         string // Tailscale ACL tag for the service definition (e.g. "tag:server")
 }
 
 func (s *Service) BackendURL() string {
@@ -82,26 +59,21 @@ func NewClient(socket string, logger *zap.Logger) *Client {
 }
 
 func (c *Client) Apply(services []Service) error {
-	desired := c.buildServeConfig(services)
+	desired := c.buildServicesConfig(services)
 
 	current, err := c.getConfig()
 	if err != nil {
 		return fmt.Errorf("failed to read current serve config: %w", err)
 	}
 
-	// Normalize nil maps so DeepEqual treats nil and empty maps the same
 	normalizeConfig(current)
 	normalizeConfig(desired)
 
-	currentCopy := *current
-	currentCopy.ETag = ""
-	if reflect.DeepEqual(&currentCopy, desired) {
+	if reflect.DeepEqual(current.Services, desired.Services) {
 		c.logger.Debug("serve config unchanged, skipping apply")
 		return nil
 	}
 
-	// Carry the ETag for optimistic concurrency on the POST
-	desired.ETag = current.ETag
 	if err := c.postConfig(desired); err != nil {
 		return err
 	}
@@ -110,38 +82,43 @@ func (c *Client) Apply(services []Service) error {
 	return nil
 }
 
-func normalizeConfig(cfg *ServeConfig) {
-	if cfg.TCP == nil {
-		cfg.TCP = make(map[string]TCPConfig)
+func normalizeConfig(cfg *ServicesConfig) {
+	if cfg.Services == nil {
+		cfg.Services = make(map[string]*ServiceDef)
 	}
-	if cfg.Web == nil {
-		cfg.Web = make(map[string]WebConfig)
+	for _, svc := range cfg.Services {
+		if svc.Endpoints == nil {
+			svc.Endpoints = make(map[string]string)
+		}
 	}
 }
 
 const localAPIBase = "http://local-tailscaled.sock/localapi/v0/serve-config"
 
-func (c *Client) getConfig() (*ServeConfig, error) {
+func (c *Client) getConfig() (*ServicesConfig, error) {
 	resp, err := c.http.Get(localAPIBase)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return &ServicesConfig{Version: "0.0.1", Services: make(map[string]*ServiceDef)}, nil
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("local API returned %d: %s", resp.StatusCode, body)
 	}
 
-	var cfg ServeConfig
+	var cfg ServicesConfig
 	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to decode serve config: %w", err)
 	}
-	cfg.ETag = resp.Header.Get("Etag")
 	return &cfg, nil
 }
 
-func (c *Client) postConfig(cfg *ServeConfig) error {
+func (c *Client) postConfig(cfg *ServicesConfig) error {
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal serve config: %w", err)
@@ -154,9 +131,6 @@ func (c *Client) postConfig(cfg *ServeConfig) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if cfg.ETag != "" {
-		req.Header.Set("If-Match", cfg.ETag)
-	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -171,10 +145,10 @@ func (c *Client) postConfig(cfg *ServeConfig) error {
 	return nil
 }
 
-func (c *Client) buildServeConfig(services []Service) *ServeConfig {
-	cfg := &ServeConfig{
-		TCP: make(map[string]TCPConfig),
-		Web: make(map[string]WebConfig),
+func (c *Client) buildServicesConfig(services []Service) *ServicesConfig {
+	cfg := &ServicesConfig{
+		Version:  "0.0.1",
+		Services: make(map[string]*ServiceDef),
 	}
 
 	for _, svc := range services {
@@ -183,13 +157,14 @@ func (c *Client) buildServeConfig(services []Service) *ServeConfig {
 			port = 443
 		}
 
-		tcpKey := fmt.Sprintf("%d", port)
-		cfg.TCP[tcpKey] = TCPConfig{HTTPS: true}
+		svcName := fmt.Sprintf("svc:%s", svc.Hostname)
+		endpointKey := fmt.Sprintf("tcp:%d", port)
 
-		cfg.Web[svc.ServeKey()] = WebConfig{
-			Handlers: map[string]Handler{
-				"/": {Proxy: svc.BackendURL()},
+		cfg.Services[svcName] = &ServiceDef{
+			Endpoints: map[string]string{
+				endpointKey: svc.BackendURL(),
 			},
+			Advertised: true,
 		}
 	}
 
