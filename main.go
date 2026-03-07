@@ -13,7 +13,11 @@ import (
 )
 
 func main() {
-	logger, _ := zap.NewProduction()
+	logCfg := zap.NewProductionConfig()
+	if os.Getenv("LOG_LEVEL") == "debug" {
+		logCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+	}
+	logger, _ := logCfg.Build()
 	defer logger.Sync()
 
 	cfg, err := config.FromEnv()
