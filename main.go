@@ -6,9 +6,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/yourorg/nomad-tailscale-controller/internal/config"
-	"github.com/yourorg/nomad-tailscale-controller/internal/nomad"
-	"github.com/yourorg/nomad-tailscale-controller/internal/tailscale"
+	"github.com/edjeffreys/nomad-tailscale-controller/internal/config"
+	"github.com/edjeffreys/nomad-tailscale-controller/internal/nomad"
+	"github.com/edjeffreys/nomad-tailscale-controller/internal/tailscale"
 	"go.uber.org/zap"
 )
 

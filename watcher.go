@@ -8,8 +8,8 @@ import (
 	"time"
 
 	nomadapi "github.com/hashicorp/nomad/api"
-	"github.com/yourorg/nomad-tailscale-controller/internal/config"
-	"github.com/yourorg/nomad-tailscale-controller/internal/tailscale"
+	"github.com/edjeffreys/nomad-tailscale-controller/internal/config"
+	"github.com/edjeffreys/nomad-tailscale-controller/internal/tailscale"
 	"go.uber.org/zap"
 )
 
