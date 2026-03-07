@@ -183,10 +183,20 @@ func (w *Watcher) fetchServices(ctx context.Context, namespace string) ([]tailsc
 				hostname = svc.ServiceName
 			}
 
-			// Backend defaults to Consul DNS for the service
 			backend := tags[tagBackend]
 			if backend == "" {
-				backend = fmt.Sprintf("%s.service.consul:%d", svc.ServiceName, svc.Port)
+				// The list stub doesn't include address/port; fetch the full
+				// registration to build a concrete backend URL.
+				regs, _, err := w.nomad.Services().Get(svc.ServiceName, q)
+				if err != nil || len(regs) == 0 {
+					w.logger.Warn("skipping service: could not get registration details",
+						zap.String("service", svc.ServiceName),
+						zap.Error(err),
+					)
+					continue
+				}
+				reg := regs[0]
+				backend = fmt.Sprintf("%s:%d", reg.Address, reg.Port)
 			}
 
 			port := 443
