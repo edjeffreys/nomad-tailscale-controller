@@ -14,8 +14,6 @@ job "tailscale-controller" {
       }
     }
 
-    # The controller needs a Tailscale sidecar of its own —
-    # this is the single Tailscale node that serves all arr services.
     volume "tailscale-state" {
       type            = "csi"
       source          = "tailscale-controller"
@@ -24,6 +22,8 @@ job "tailscale-controller" {
       access_mode     = "multi-node-multi-writer"
     }
 
+    # Tailscale sidecar — the single node that advertises all managed services.
+    # Shares its daemon socket with the controller via /alloc/tmp/.
     task "tailscale" {
       driver = "docker"
 
@@ -37,15 +37,16 @@ job "tailscale-controller" {
       }
 
       env {
-        TS_HOSTNAME  = "arr-ingress"
-        TS_STATE_DIR = "/var/lib/tailscale"
-        TS_USERSPACE = "true"
-        TS_SOCKET    = "/alloc/tmp/tailscaled.sock"
+        TS_HOSTNAME   = "nomad-ingress"
+        TS_STATE_DIR  = "/var/lib/tailscale"
+        TS_USERSPACE  = "true"
+        TS_SOCKET     = "/alloc/tmp/tailscaled.sock"
+        TS_EXTRA_ARGS = "--advertise-tags=tag:server"
       }
 
       template {
         data        = <<EOF
-{{ with nomadVar "jobs/tailscale-controller" }}TS_AUTHKEY={{ .authkey | trimSpace }}{{ end }}
+{{ with nomadVar "nomad/jobs/tailscale-controller" }}TS_AUTHKEY={{ .authkey | trimSpace }}{{ end }}
 EOF
         destination = "secrets/tailscale.env"
         env         = true
@@ -70,12 +71,12 @@ EOF
       }
 
       env {
-        CONSUL_HTTP_ADDR  = "http://172.17.0.1:8500"
-        TAILNET           = "tail5f17e.ts.net"
-        POLL_INTERVAL     = "30s"
-        TAG_PREFIX        = "tailscale."
-        TAILSCALE_SOCKET  = "/alloc/tmp/tailscaled.sock"
-        TS_DEFAULT_TAG    = "tag:server"
+        CONSUL_HTTP_ADDR = "http://172.17.0.1:8500"
+        TAILNET          = "tail5f17e.ts.net"
+        POLL_INTERVAL    = "30s"
+        TAG_PREFIX       = "tailscale."
+        TAILSCALE_SOCKET = "/alloc/tmp/tailscaled.sock"
+        TS_DEFAULT_TAG   = "tag:server"
       }
 
       template {

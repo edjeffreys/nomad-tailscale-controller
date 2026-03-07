@@ -1,67 +1,143 @@
 # nomad-tailscale-controller
 
-A lightweight controller that watches Nomad services and dynamically manages a Tailscale serve config — similar to how Traefik uses tags for routing, but for your Tailscale ingress.
+A controller that watches [Consul](https://www.consul.io/) for services tagged with `tailscale.enable=true` and automatically exposes them as [Tailscale Services](https://tailscale.com/kb/1438/vip-services) — similar to how [Traefik](https://doc.traefik.io/traefik/providers/consul-catalog/) uses Consul Catalog tags for routing, but for your private Tailscale network.
 
 ## How it works
 
-1. The controller watches the Nomad event stream (with polling fallback) for services tagged with `tailscale.*`
-2. When it finds services with `tailscale.enable=true`, it builds a Tailscale serve config
-3. It applies the config via `tailscale serve --config` on the ingress node
-4. One Tailscale node (`tailscale-ingress`) serves all your private services — rather than a sidecar per service
+```
+┌──────────────────┐         ┌──────────────────┐         ┌──────────────────┐
+│  Consul Catalog   │         │    Controller     │         │   Tailscale API   │
+│                   │◄────────│                   │────────►│  (control plane)  │
+│  service: mealie  │ blocking│  1. Discover svcs │  PUT    │                   │
+│  tags:            │  query  │  2. Ensure VIP    │ /vip-   │  Creates svc:     │
+│   - tailscale.    │         │     service defs  │ services│  mealie VIP       │
+│     enable=true   │         │  3. Apply local   │         │  auto-assigns IP  │
+│                   │         │     serve config  │         │                   │
+└──────────────────┘         └────────┬─────────┘         └──────────────────┘
+                                      │
+                                      │ POST /localapi/v0/serve-config
+                                      ▼
+                             ┌──────────────────┐
+                             │  Tailscale node   │
+                             │  (sidecar)        │
+                             │                   │
+                             │  Advertises       │
+                             │  endpoints for    │
+                             │  all managed svcs │
+                             └──────────────────┘
+```
+
+1. **Discover** — watches the Consul catalog (via blocking queries + poll fallback) for services tagged with `tailscale.enable=true`
+2. **Ensure VIP Services** — if OAuth credentials are configured, auto-creates [Tailscale VIP Service](https://tailscale.com/kb/1438/vip-services) definitions via the control plane API so you don't have to manually define them in the admin console
+3. **Apply serve config** — posts a [Tailscale Services configuration](https://tailscale.com/kb/1242/tailscale-serve) to the local Tailscale daemon via its Unix socket API, mapping each service's VIP port to its Consul backend address
+
+One Tailscale node serves all your tagged services — no sidecar-per-service required.
 
 ## Service tags
 
-Add these tags to any Nomad service to expose it via Tailscale:
+Add these tags to any Consul-registered service (including Nomad `service` blocks which default to Consul):
 
 ```hcl
 service {
-  name = "whoami"
-  port = "whoami-http"
+  name = "mealie"
+  port = "http"
 
   tags = [
     "tailscale.enable=true",
-    "tailscale.hostname=whoami",   # optional, defaults to service name
-    "tailscale.port=443",           # optional, defaults to 443
-    # tailscale.backend defaults to <service>.service.consul:<port>
-    # override if needed:
-    # "tailscale.backend=whoami.service.consul:8080",
   ]
 }
 ```
 
-This produces a serve config entry:
-```json
-{
-  "Web": {
-    "whoami.tail5f17e.ts.net:443": {
-      "Handlers": { "/": { "Proxy": "http://whoami.service.consul:8080" } }
-    }
-  }
+That's it. The controller will auto-create a Tailscale Service called `svc:mealie`, advertise it on the service's Consul port, and proxy traffic to the backend.
+
+### Optional tags
+
+| Tag | Default | Description |
+|---|---|---|
+| `tailscale.enable=true` | **(required)** | Opt-in to Tailscale exposure |
+| `tailscale.hostname=X` | Consul service name | Override the Tailscale service name (`svc:X`) |
+| `tailscale.port=X` | Consul service port | Override the frontend port (e.g. `443` for HTTPS) |
+| `tailscale.backend=host:port` | Consul instance address:port | Override the backend target |
+| `tailscale.tag=tag:X` | `TS_DEFAULT_TAG` | Override the Tailscale ACL tag for this service |
+
+### Example with overrides
+
+```hcl
+service {
+  name = "mealie"
+  port = "http"
+
+  tags = [
+    "tailscale.enable=true",
+    "tailscale.hostname=recipes",       # exposed as svc:recipes
+    "tailscale.port=443",               # serve on tcp:443 instead of the Consul port
+    "tailscale.tag=tag:web",            # use tag:web instead of the default tag:server
+  ]
 }
+```
+
+Works alongside other tag-based systems — Traefik tags are simply ignored:
+
+```hcl
+tags = [
+  "tailscale.enable=true",
+  "traefik.enable=true",
+  "traefik.http.routers.mealie.rule=Host(`mealie.example.com`)",
+]
 ```
 
 ## Configuration
 
 | Env var | Default | Description |
 |---|---|---|
-| `TAILNET` | required | Your tailnet domain e.g. `tail5f17e.ts.net` |
-| `NOMAD_ADDR` | `http://localhost:4646` | Nomad API address |
-| `NOMAD_TOKEN` | | Nomad ACL token |
-| `NOMAD_NAMESPACES` | `*` | Comma-separated namespaces to watch |
-| `TAILSCALE_SOCKET` | `/var/run/tailscale/tailscaled.sock` | Tailscale daemon socket |
-| `POLL_INTERVAL` | `10s` | Fallback poll interval |
-| `TAG_PREFIX` | `tailscale.` | Tag prefix to look for |
+| `TAILNET` | **(required)** | Your tailnet domain (e.g. `tail5f17e.ts.net`) |
+| `CONSUL_HTTP_ADDR` | `http://localhost:8500` | Consul agent address |
+| `CONSUL_HTTP_TOKEN` | | Consul ACL token (if ACLs are enabled) |
+| `TAILSCALE_SOCKET` | `/var/run/tailscale/tailscaled.sock` | Path to the Tailscale daemon socket |
+| `TS_OAUTH_CLIENT_ID` | | Tailscale OAuth client ID (enables auto-creation of VIP services) |
+| `TS_OAUTH_CLIENT_SECRET` | | Tailscale OAuth client secret |
+| `TS_DEFAULT_TAG` | `tag:server` | Default ACL tag applied to auto-created services |
+| `POLL_INTERVAL` | `10s` | Fallback poll interval (Consul blocking queries provide real-time updates) |
+| `TAG_PREFIX` | `tailscale.` | Tag prefix to look for on Consul services |
+| `LOG_LEVEL` | `info` | Set to `debug` for verbose logging |
+
+### Tailscale OAuth setup
+
+To enable automatic VIP service creation, create an OAuth client in the [Tailscale admin console](https://login.tailscale.com/admin/settings/oauth):
+
+1. Go to **Settings → OAuth clients → Generate OAuth client**
+2. Grant the **Services: Write** scope
+3. Store the client ID and secret securely (e.g. in Nomad variables)
+
+Without OAuth credentials, the controller runs in **local-only mode** — it still configures the Tailscale node's serve config, but you'll need to manually create VIP service definitions in the admin console.
+
+### Tailscale ACL auto-approvers
+
+To avoid manually approving each service host, add an auto-approver rule to your [Tailscale ACL policy](https://login.tailscale.com/admin/acls):
+
+```json
+{
+  "autoApprovers": {
+    "services": {
+      "svc:*": ["tag:server"]
+    }
+  }
+}
+```
 
 ## Deployment
 
-1. Store your Tailscale auth key and Nomad token in Nomad variables:
+### 1. Store secrets in Nomad variables
+
 ```bash
-nomad var put -namespace infra jobs/tailscale-controller \
-  authkey=tskey-client-xxx \
-  nomad_token=your-nomad-token
+nomad var put nomad/jobs/tailscale-controller \
+  authkey="tskey-auth-xxx" \
+  oauth_client_id="your-oauth-client-id" \
+  oauth_client_secret="your-oauth-client-secret"
 ```
 
-2. Create the NFS volume for Tailscale state:
+### 2. Create a CSI volume for Tailscale state persistence
+
 ```hcl
 resource "nomad_csi_volume_registration" "tailscale_controller" {
   plugin_id   = "nfs"
@@ -77,27 +153,29 @@ resource "nomad_csi_volume_registration" "tailscale_controller" {
 }
 ```
 
-3. Deploy the controller:
+### 3. Deploy the controller
+
 ```bash
-nomad job run deploy/controller.nomad.hcl
+nomad job run controller.nomad.hcl
 ```
 
-4. Tag your services and redeploy them — the controller will pick them up within one poll interval.
+### 4. Tag your services
 
-## Consul intentions
+Add `tailscale.enable=true` to any Consul-registered service and redeploy — the controller will pick it up within seconds (via blocking query) or at the next poll interval.
 
-Since traffic now flows from `tailscale-controller` → Consul service rather than per-service Tailscale sidecars, update your intentions:
+## Architecture
 
-```hcl
-resource "consul_config_entry" "whoami" {
-  name = "whoami"
-  kind = "service-intentions"
+The controller runs as a Nomad job with two tasks in the same group:
 
-  config_json = jsonencode({
-    Sources = [
-      { Name = "tailscale-controller", Action = "allow" },
-      { Name = "*",                    Action = "deny"  },
-    ]
-  })
-}
+- **tailscale** (sidecar) — a Tailscale node that advertises all managed services. Shares its daemon socket with the controller via Nomad's `/alloc/tmp/` directory.
+- **controller** — watches Consul, manages VIP service definitions, and configures the Tailscale node's serve config.
+
+Traffic flows: **Tailscale client → Tailscale VIP → Tailscale node → Consul service backend**
+
+## Development
+
+```bash
+go build ./...
+go test ./...
+go vet ./...
 ```
