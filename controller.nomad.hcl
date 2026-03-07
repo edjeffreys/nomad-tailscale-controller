@@ -40,6 +40,7 @@ job "tailscale-controller" {
         TS_HOSTNAME  = "arr-ingress"
         TS_STATE_DIR = "/var/lib/tailscale"
         TS_USERSPACE = "true"
+        TS_SOCKET    = "/alloc/tmp/tailscaled.sock"
       }
 
       template {
@@ -69,11 +70,12 @@ EOF
       }
 
       env {
-        NOMAD_ADDR       = "http://172.17.0.1:4646"
-        TAILNET          = "tail5f17e.ts.net"
-        NOMAD_NAMESPACES = "arr"
-        POLL_INTERVAL    = "30s"
-        TAG_PREFIX       = "tailscale."
+        NOMAD_ADDR        = "http://172.17.0.1:4646"
+        TAILNET           = "tail5f17e.ts.net"
+        NOMAD_NAMESPACES  = "arr"
+        POLL_INTERVAL     = "30s"
+        TAG_PREFIX        = "tailscale."
+        TAILSCALE_SOCKET  = "/alloc/tmp/tailscaled.sock"
       }
 
       template {

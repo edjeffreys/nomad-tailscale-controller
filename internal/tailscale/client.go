@@ -15,8 +15,9 @@ import (
 
 // ServeConfig mirrors the Tailscale serve config JSON format.
 type ServeConfig struct {
-	TCP map[string]TCPConfig `json:"TCP,omitempty"`
-	Web map[string]WebConfig `json:"Web,omitempty"`
+	TCP  map[string]TCPConfig `json:"TCP,omitempty"`
+	Web  map[string]WebConfig `json:"Web,omitempty"`
+	ETag string               `json:"-"` // populated from response header, not the JSON body
 }
 
 type TCPConfig struct {
@@ -88,11 +89,16 @@ func (c *Client) Apply(services []Service) error {
 		return fmt.Errorf("failed to read current serve config: %w", err)
 	}
 
-	if reflect.DeepEqual(current, desired) {
+	// Compare without ETags
+	currentCopy := *current
+	currentCopy.ETag = ""
+	if reflect.DeepEqual(&currentCopy, desired) {
 		c.logger.Debug("serve config unchanged, skipping apply")
 		return nil
 	}
 
+	// Carry the ETag for optimistic concurrency on the POST
+	desired.ETag = current.ETag
 	if err := c.postConfig(desired); err != nil {
 		return err
 	}
@@ -101,8 +107,10 @@ func (c *Client) Apply(services []Service) error {
 	return nil
 }
 
+const localAPIBase = "http://local-tailscaled.sock/localapi/v0/serve-config"
+
 func (c *Client) getConfig() (*ServeConfig, error) {
-	resp, err := c.http.Get("http://local-tailscaled.sock/localapi/v0/serve/config")
+	resp, err := c.http.Get(localAPIBase)
 	if err != nil {
 		return nil, err
 	}
@@ -117,6 +125,7 @@ func (c *Client) getConfig() (*ServeConfig, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to decode serve config: %w", err)
 	}
+	cfg.ETag = resp.Header.Get("Etag")
 	return &cfg, nil
 }
 
@@ -128,11 +137,16 @@ func (c *Client) postConfig(cfg *ServeConfig) error {
 
 	c.logger.Debug("applying serve config", zap.String("config", string(data)))
 
-	resp, err := c.http.Post(
-		"http://local-tailscaled.sock/localapi/v0/serve/config",
-		"application/json",
-		bytes.NewReader(data),
-	)
+	req, err := http.NewRequest(http.MethodPost, localAPIBase, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if cfg.ETag != "" {
+		req.Header.Set("If-Match", cfg.ETag)
+	}
+
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to post serve config: %w", err)
 	}
