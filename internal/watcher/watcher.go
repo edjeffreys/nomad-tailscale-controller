@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -278,14 +279,27 @@ func (w *Watcher) fetchServices(ctx context.Context) ([]tailscale.Service, error
 					zap.String("backend", backend),
 				)
 			} else if meshServices[svcName] {
-				// Mesh-enrolled service: use .virtual.consul hostname so traffic
-				// routes through transparent proxy (iptables → Envoy → backend).
-				// Direct bridge IPs from other namespaces are unreachable.
-				backend = fmt.Sprintf("%s.virtual.consul:%d", svcName, servicePort)
-				w.logger.Debug("using consul virtual hostname (mesh service)",
-					zap.String("service", svcName),
-					zap.String("backend", backend),
-				)
+				// Mesh-enrolled service: resolve .virtual.consul to a virtual IP
+				// so tailscaled doesn't need DNS resolution at proxy time.
+				// The virtual IP (240.0.0.x) is intercepted by transparent proxy
+				// iptables rules → Envoy → actual backend.
+				virtualHost := fmt.Sprintf("%s.virtual.consul", svcName)
+				if ips, err := net.LookupHost(virtualHost); err == nil && len(ips) > 0 {
+					backend = fmt.Sprintf("%s:%d", ips[0], servicePort)
+					w.logger.Debug("resolved consul virtual hostname to IP",
+						zap.String("service", svcName),
+						zap.String("hostname", virtualHost),
+						zap.String("backend", backend),
+					)
+				} else {
+					// Fallback to hostname if DNS resolution fails
+					backend = fmt.Sprintf("%s:%d", virtualHost, servicePort)
+					w.logger.Warn("could not resolve consul virtual hostname, using hostname directly",
+						zap.String("service", svcName),
+						zap.String("hostname", virtualHost),
+						zap.Error(err),
+					)
+				}
 			} else {
 				addr := inst.ServiceAddress
 				if addr == "" {
