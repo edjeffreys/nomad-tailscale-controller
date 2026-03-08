@@ -217,6 +217,9 @@ func (w *Watcher) fetchServices(ctx context.Context) ([]tailscale.Service, error
 
 	var result []tailscale.Service
 
+	// Build set of mesh-enrolled services from sidecar proxy entries.
+	meshServices := meshServicesFromCatalog(catalog)
+
 	for svcName, svcTags := range catalog {
 		w.logger.Debug("evaluating service",
 			zap.String("service", svcName),
@@ -260,17 +263,26 @@ func (w *Watcher) fetchServices(ctx context.Context) ([]tailscale.Service, error
 			inst := instances[0]
 			servicePort = inst.ServicePort
 
-			// Prefer Consul Connect virtual address (mesh routing via Envoy).
-			// Falls back to direct address for non-mesh services.
-			if va, ok := inst.ServiceTaggedAddresses["consul-virtual"]; ok {
-				addr := va.Address
+			// Prefer Consul Connect virtual address from tagged addresses.
+			// Falls back to .virtual.consul hostname for mesh services,
+			// or direct address for non-mesh services.
+			if va, ok := inst.ServiceTaggedAddresses["consul-virtual"]; ok && va.Address != "" {
 				port := va.Port
 				if port == 0 {
 					port = servicePort
 				}
 				servicePort = port
-				backend = fmt.Sprintf("%s:%d", addr, port)
-				w.logger.Debug("using consul virtual address",
+				backend = fmt.Sprintf("%s:%d", va.Address, port)
+				w.logger.Debug("using consul virtual address from catalog",
+					zap.String("service", svcName),
+					zap.String("backend", backend),
+				)
+			} else if meshServices[svcName] {
+				// Mesh-enrolled service: use .virtual.consul hostname so traffic
+				// routes through transparent proxy (iptables → Envoy → backend).
+				// Direct bridge IPs from other namespaces are unreachable.
+				backend = fmt.Sprintf("%s.virtual.consul:%d", svcName, servicePort)
+				w.logger.Debug("using consul virtual hostname (mesh service)",
 					zap.String("service", svcName),
 					zap.String("backend", backend),
 				)
@@ -280,6 +292,10 @@ func (w *Watcher) fetchServices(ctx context.Context) ([]tailscale.Service, error
 					addr = inst.Address
 				}
 				backend = fmt.Sprintf("%s:%d", addr, servicePort)
+				w.logger.Debug("using direct address (non-mesh service)",
+					zap.String("service", svcName),
+					zap.String("backend", backend),
+				)
 			}
 		}
 
@@ -343,4 +359,18 @@ func parseTags(tags []string, prefix string) map[string]string {
 // which inherit their parent's tags and should not be treated as separate services.
 func isSidecarProxy(name string) bool {
 	return strings.HasSuffix(name, "-sidecar-proxy")
+}
+
+// meshServicesFromCatalog returns the set of service names that have a
+// corresponding "-sidecar-proxy" entry in the catalog, indicating they
+// are enrolled in the Consul Connect service mesh.
+func meshServicesFromCatalog(catalog map[string][]string) map[string]bool {
+	mesh := make(map[string]bool)
+	for svcName := range catalog {
+		if isSidecarProxy(svcName) {
+			parent := strings.TrimSuffix(svcName, "-sidecar-proxy")
+			mesh[parent] = true
+		}
+	}
+	return mesh
 }

@@ -195,6 +195,14 @@ The controller runs as a Nomad job with two tasks in the same group:
 
 Traffic flows: **Tailscale client → HTTPS → Tailscale VIP → TLS termination → HTTP → Consul service backend**
 
+### Consul Connect mesh routing
+
+When running inside Consul Connect (bridge mode with transparent proxy), backend services in other network namespaces aren't directly reachable by IP. The controller automatically detects mesh-enrolled services (those with a corresponding `-sidecar-proxy` in the catalog) and uses `.virtual.consul` hostnames as backends. This routes traffic through the transparent proxy (iptables → Envoy → actual backend).
+
+For non-mesh services (no sidecar proxy), the controller uses the direct Consul address as normal.
+
+> **Note:** Your Docker daemon must be configured to forward `.consul` DNS queries to Consul's DNS interface (port 8600). See [Consul DNS forwarding](https://developer.hashicorp.com/consul/docs/services/discovery/dns-forwarding) for setup.
+
 ## Development
 
 ```bash

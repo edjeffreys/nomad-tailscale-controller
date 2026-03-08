@@ -122,3 +122,61 @@ func TestIsSidecarProxy(t *testing.T) {
 		})
 	}
 }
+
+func TestMeshServicesFromCatalog(t *testing.T) {
+	tests := []struct {
+		name    string
+		catalog map[string][]string
+		want    map[string]bool
+	}{
+		{
+			name: "detects mesh services from sidecar proxies",
+			catalog: map[string][]string{
+				"mealie":                 {"tailscale.enable=true"},
+				"mealie-sidecar-proxy":   {"tailscale.enable=true"},
+				"overseerr":              {"tailscale.enable=true"},
+				"overseerr-sidecar-proxy": {"tailscale.enable=true"},
+				"consul":                 {},
+			},
+			want: map[string]bool{"mealie": true, "overseerr": true},
+		},
+		{
+			name: "no mesh services without sidecar proxies",
+			catalog: map[string][]string{
+				"mealie":  {"tailscale.enable=true"},
+				"consul":  {},
+				"traefik": {},
+			},
+			want: map[string]bool{},
+		},
+		{
+			name:    "empty catalog",
+			catalog: map[string][]string{},
+			want:    map[string]bool{},
+		},
+		{
+			name: "mixed mesh and non-mesh",
+			catalog: map[string][]string{
+				"mealie":               {"tailscale.enable=true"},
+				"mealie-sidecar-proxy": {"tailscale.enable=true"},
+				"homeassistant":        {"traefik.enable=true"},
+			},
+			want: map[string]bool{"mealie": true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := meshServicesFromCatalog(tt.catalog)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d entries, want %d\ngot:  %v\nwant: %v",
+					len(got), len(tt.want), got, tt.want)
+			}
+			for k, v := range tt.want {
+				if got[k] != v {
+					t.Errorf("[%q] = %v, want %v", k, got[k], v)
+				}
+			}
+		})
+	}
+}
