@@ -56,7 +56,7 @@ service {
 }
 ```
 
-That's it. The controller will auto-create a Tailscale Service called `svc:mealie`, advertise it on the service's Consul port, and proxy traffic to the backend.
+That's it. The controller will auto-create a Tailscale Service called `svc:mealie`, terminate TLS with Tailscale's auto-provisioned certificate, and proxy HTTPS traffic to the HTTP backend.
 
 ### Optional tags
 
@@ -64,7 +64,8 @@ That's it. The controller will auto-create a Tailscale Service called `svc:meali
 |---|---|---|
 | `tailscale.enable=true` | **(required)** | Opt-in to Tailscale exposure |
 | `tailscale.hostname=X` | Consul service name | Override the Tailscale service name (`svc:X`) |
-| `tailscale.port=X` | Consul service port | Override the frontend port (e.g. `443` for HTTPS) |
+| `tailscale.proto=X` | `https` | Protocol mode: `https` (TLS termination + HTTP proxy) or `tcp` (raw TCP forwarding) |
+| `tailscale.port=X` | `443` (https) / service port (tcp) | Override the frontend port |
 | `tailscale.backend=host:port` | Consul instance address:port | Override the backend target |
 | `tailscale.tag=tag:X` | `TS_DEFAULT_TAG` | Override the Tailscale ACL tag for this service |
 
@@ -78,7 +79,6 @@ service {
   tags = [
     "tailscale.enable=true",
     "tailscale.hostname=recipes",       # exposed as svc:recipes
-    "tailscale.port=443",               # serve on tcp:443 instead of the Consul port
     "tailscale.tag=tag:web",            # use tag:web instead of the default tag:server
   ]
 }
@@ -91,6 +91,20 @@ tags = [
   "tailscale.enable=true",
   "traefik.enable=true",
   "traefik.http.routers.mealie.rule=Host(`mealie.example.com`)",
+]
+```
+
+### Protocol modes
+
+**`https` (default)** — Tailscale terminates TLS using an auto-provisioned certificate and proxies HTTP to the backend. This is the right choice for most web services (the backend doesn't need its own TLS cert). Frontend port defaults to 443.
+
+**`tcp`** — Raw TCP forwarding with no TLS termination. Use this for non-HTTP protocols (databases, game servers, etc.) or when the backend handles its own TLS. Frontend port defaults to the Consul service port.
+
+```hcl
+# Database: raw TCP on the actual port
+tags = [
+  "tailscale.enable=true",
+  "tailscale.proto=tcp",
 ]
 ```
 

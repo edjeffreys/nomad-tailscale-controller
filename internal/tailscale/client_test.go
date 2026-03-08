@@ -35,7 +35,7 @@ default:
 }
 
 func TestBuildServeConfig_Empty(t *testing.T) {
-c := &Client{logger: zap.NewNop()}
+c := &Client{tailnet: "tail5f17e.ts.net", logger: zap.NewNop()}
 cfg := c.buildServeConfig(nil)
 
 if len(cfg.Services) != 0 {
@@ -43,8 +43,8 @@ t.Errorf("expected empty Services map, got %v", cfg.Services)
 }
 }
 
-func TestBuildServeConfig_SingleService(t *testing.T) {
-c := &Client{logger: zap.NewNop()}
+func TestBuildServeConfig_SingleService_HTTPS(t *testing.T) {
+c := &Client{tailnet: "tail5f17e.ts.net", logger: zap.NewNop()}
 
 services := []Service{
 {Hostname: "sonarr", BackendAddr: "sonarr.service.consul:8989", Port: 443},
@@ -60,13 +60,51 @@ handler, ok := svcCfg.TCP[443]
 if !ok {
 t.Fatal("expected TCP handler for port 443")
 }
+if !handler.HTTPS {
+t.Error("expected HTTPS=true for default proto")
+}
+
+hp := HostPort("sonarr.tail5f17e.ts.net:443")
+webCfg, ok := svcCfg.Web[hp]
+if !ok {
+t.Fatalf("expected Web handler for %s", hp)
+}
+h, ok := webCfg.Handlers["/"]
+if !ok {
+t.Fatal("expected handler for /")
+}
+if h.Proxy != "http://sonarr.service.consul:8989" {
+t.Errorf("Proxy = %q, want %q", h.Proxy, "http://sonarr.service.consul:8989")
+}
+}
+
+func TestBuildServeConfig_SingleService_TCP(t *testing.T) {
+c := &Client{tailnet: "tail5f17e.ts.net", logger: zap.NewNop()}
+
+services := []Service{
+{Hostname: "sonarr", BackendAddr: "sonarr.service.consul:8989", Port: 443, Proto: "tcp"},
+}
+
+cfg := c.buildServeConfig(services)
+
+svcCfg, ok := cfg.Services["svc:sonarr"]
+if !ok {
+t.Fatal("expected service entry for svc:sonarr")
+}
+handler, ok := svcCfg.TCP[443]
+if !ok {
+t.Fatal("expected TCP handler for port 443")
+}
 if handler.TCPForward != "sonarr.service.consul:8989" {
 t.Errorf("TCPForward = %q, want %q", handler.TCPForward, "sonarr.service.consul:8989")
+}
+if len(svcCfg.Web) != 0 {
+t.Error("expected no Web handlers for tcp proto")
 }
 }
 
 func TestBuildServeConfig_MultipleServices(t *testing.T) {
-c := &Client{logger: zap.NewNop()}
+c := &Client{tailnet: "tail5f17e.ts.net", logger: zap.NewNop()}
 
 services := []Service{
 {Hostname: "sonarr", BackendAddr: "sonarr:8989", Port: 443},
@@ -87,7 +125,7 @@ t.Error("missing svc:radarr")
 }
 
 func TestBuildServeConfig_CustomPort(t *testing.T) {
-c := &Client{logger: zap.NewNop()}
+c := &Client{tailnet: "tail5f17e.ts.net", logger: zap.NewNop()}
 
 services := []Service{
 {Hostname: "myapp", BackendAddr: "myapp:3000", Port: 8443},
@@ -99,10 +137,14 @@ svcCfg := cfg.Services["svc:myapp"]
 if _, ok := svcCfg.TCP[8443]; !ok {
 t.Error("expected TCP handler for port 8443")
 }
+hp := HostPort("myapp.tail5f17e.ts.net:8443")
+if _, ok := svcCfg.Web[hp]; !ok {
+t.Errorf("expected Web handler for %s", hp)
+}
 }
 
 func TestBuildServeConfig_ZeroPortDefaultsTo443(t *testing.T) {
-c := &Client{logger: zap.NewNop()}
+c := &Client{tailnet: "tail5f17e.ts.net", logger: zap.NewNop()}
 
 services := []Service{
 {Hostname: "myapp", BackendAddr: "myapp:3000", Port: 0},
@@ -148,7 +190,14 @@ cfg := &ServeConfig{
 Services: map[string]*ServiceConfig{
 "svc:myapp": {
 TCP: map[uint16]*TCPPortHandler{
-443: {TCPForward: "localhost:3000"},
+443: {HTTPS: true},
+},
+Web: map[HostPort]*WebServerConfig{
+"myapp.tail5f17e.ts.net:443": {
+Handlers: map[string]*HTTPHandler{
+"/": {Proxy: "http://localhost:3000"},
+},
+},
 },
 },
 },
@@ -163,14 +212,14 @@ jsonStr := string(data)
 if !contains(jsonStr, `"svc:myapp"`) {
 t.Error("expected svc:myapp in JSON")
 }
-if !contains(jsonStr, `"TCPForward"`) {
-t.Error("expected TCPForward in JSON")
+if !contains(jsonStr, `"HTTPS":true`) {
+t.Error("expected HTTPS:true in JSON")
 }
-if !contains(jsonStr, `"localhost:3000"`) {
-t.Error("expected backend addr in JSON")
+if !contains(jsonStr, `"Proxy"`) {
+t.Error("expected Proxy in JSON")
 }
-if contains(jsonStr, `"version"`) {
-t.Error("unexpected version field in JSON")
+if !contains(jsonStr, `"http://localhost:3000"`) {
+t.Error("expected backend URL in JSON")
 }
 
 var decoded ServeConfig
@@ -182,8 +231,16 @@ if svcCfg == nil {
 t.Fatal("svc:myapp missing after round-trip")
 }
 handler := svcCfg.TCP[443]
-if handler == nil || handler.TCPForward != "localhost:3000" {
-t.Error("TCPForward should survive round-trip")
+if handler == nil || !handler.HTTPS {
+t.Error("HTTPS should survive round-trip")
+}
+webCfg := svcCfg.Web["myapp.tail5f17e.ts.net:443"]
+if webCfg == nil {
+t.Fatal("Web config missing after round-trip")
+}
+h := webCfg.Handlers["/"]
+if h == nil || h.Proxy != "http://localhost:3000" {
+t.Error("Proxy should survive round-trip")
 }
 }
 
@@ -192,7 +249,14 @@ existingConfig := &ServeConfig{
 Services: map[string]*ServiceConfig{
 "svc:myapp": {
 TCP: map[uint16]*TCPPortHandler{
-443: {TCPForward: "myapp:3000"},
+443: {HTTPS: true},
+},
+Web: map[HostPort]*WebServerConfig{
+"myapp.tail5f17e.ts.net:443": {
+Handlers: map[string]*HTTPHandler{
+"/": {Proxy: "http://myapp:3000"},
+},
+},
 },
 },
 },
@@ -215,6 +279,7 @@ srv := httptest.NewServer(mux)
 t.Cleanup(srv.Close)
 
 c := &Client{
+tailnet: "tail5f17e.ts.net",
 logger: zap.NewNop(),
 http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
 }
@@ -253,6 +318,7 @@ srv := httptest.NewServer(mux)
 t.Cleanup(srv.Close)
 
 c := &Client{
+tailnet: "tail5f17e.ts.net",
 logger: zap.NewNop(),
 http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
 }
@@ -273,8 +339,18 @@ if !ok {
 t.Fatal("expected svc:sonarr in posted config")
 }
 handler := svcCfg.TCP[443]
-if handler == nil || handler.TCPForward != "sonarr:8989" {
-t.Errorf("TCPForward = %q, want %q", handler.TCPForward, "sonarr:8989")
+if handler == nil || !handler.HTTPS {
+t.Error("expected HTTPS=true in posted config")
+}
+
+hp := HostPort("sonarr.tail5f17e.ts.net:443")
+webCfg, ok := svcCfg.Web[hp]
+if !ok {
+t.Fatalf("expected Web handler for %s", hp)
+}
+h := webCfg.Handlers["/"]
+if h == nil || h.Proxy != "http://sonarr:8989" {
+t.Errorf("Proxy = %q, want %q", h.Proxy, "http://sonarr:8989")
 }
 
 // Verify advertise was called
@@ -301,6 +377,7 @@ srv := httptest.NewServer(mux)
 t.Cleanup(srv.Close)
 
 c := &Client{
+tailnet: "tail5f17e.ts.net",
 logger: zap.NewNop(),
 http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
 }
@@ -330,7 +407,16 @@ mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.
 if r.Method == http.MethodGet {
 json.NewEncoder(w).Encode(&ServeConfig{
 Services: map[string]*ServiceConfig{
-"svc:myapp": {TCP: map[uint16]*TCPPortHandler{443: {TCPForward: "myapp:3000"}}},
+"svc:myapp": {
+TCP: map[uint16]*TCPPortHandler{443: {HTTPS: true}},
+Web: map[HostPort]*WebServerConfig{
+"myapp.tail5f17e.ts.net:443": {
+Handlers: map[string]*HTTPHandler{
+"/": {Proxy: "http://myapp:3000"},
+},
+},
+},
+},
 },
 })
 return
@@ -351,6 +437,7 @@ srv := httptest.NewServer(mux)
 t.Cleanup(srv.Close)
 
 c := &Client{
+tailnet: "tail5f17e.ts.net",
 logger: zap.NewNop(),
 http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
 }
@@ -384,6 +471,7 @@ srv := httptest.NewServer(mux)
 t.Cleanup(srv.Close)
 
 c := &Client{
+tailnet: "tail5f17e.ts.net",
 logger: zap.NewNop(),
 http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
 }
@@ -415,6 +503,7 @@ srv := httptest.NewServer(mux)
 t.Cleanup(srv.Close)
 
 c := &Client{
+tailnet: "tail5f17e.ts.net",
 logger: zap.NewNop(),
 http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
 }
@@ -446,6 +535,7 @@ srv := httptest.NewServer(mux)
 t.Cleanup(srv.Close)
 
 c := &Client{
+tailnet: "tail5f17e.ts.net",
 logger: zap.NewNop(),
 http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
 }
@@ -473,6 +563,7 @@ srv := httptest.NewServer(mux)
 t.Cleanup(srv.Close)
 
 c := &Client{
+tailnet: "tail5f17e.ts.net",
 logger: zap.NewNop(),
 http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
 }
@@ -504,6 +595,7 @@ srv := httptest.NewServer(mux)
 t.Cleanup(srv.Close)
 
 c := &Client{
+tailnet: "tail5f17e.ts.net",
 logger: zap.NewNop(),
 http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
 }
@@ -536,6 +628,7 @@ srv := httptest.NewServer(mux)
 t.Cleanup(srv.Close)
 
 c := &Client{
+tailnet: "tail5f17e.ts.net",
 logger: zap.NewNop(),
 http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
 }
@@ -558,6 +651,7 @@ srv := httptest.NewServer(mux)
 t.Cleanup(srv.Close)
 
 c := &Client{
+tailnet: "tail5f17e.ts.net",
 logger: zap.NewNop(),
 http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
 }

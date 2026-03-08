@@ -28,7 +28,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	tsClient := tailscale.NewClient(cfg.TailscaleSocket, logger)
+	tsClient := tailscale.NewClient(cfg.TailscaleSocket, cfg.Tailnet, logger)
 
 	var apiClient *tailscale.APIClient
 	if cfg.TSOAuthClientID != "" && cfg.TSOAuthClientSecret != "" {

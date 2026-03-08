@@ -19,6 +19,7 @@ const (
 	tagPort     = "port"
 	tagBackend  = "backend"
 	tagTag      = "tag"
+	tagProto    = "proto"
 )
 
 // Watcher watches Consul for services tagged with tailscale. tags
@@ -265,9 +266,18 @@ func (w *Watcher) fetchServices(ctx context.Context) ([]tailscale.Service, error
 			backend = fmt.Sprintf("%s:%d", addr, servicePort)
 		}
 
-		// Default frontend port to the Consul service's actual port, fall back to 443
+		// Default protocol: HTTPS with TLS termination by Tailscale.
+		// Use tailscale.proto=tcp for raw TCP forwarding.
+		proto := tags[tagProto]
+		if proto == "" {
+			proto = "https"
+		}
+
+		// Default frontend port: 443 for HTTPS, backend's actual port for TCP
 		port := servicePort
-		if port == 0 {
+		if proto == "https" {
+			port = 443
+		} else if port == 0 {
 			port = 443
 		}
 		if p := tags[tagPort]; p != "" {
@@ -285,6 +295,7 @@ func (w *Watcher) fetchServices(ctx context.Context) ([]tailscale.Service, error
 			Hostname:    hostname,
 			BackendAddr: backend,
 			Port:        port,
+			Proto:       proto,
 			Tag:         tag,
 		})
 	}

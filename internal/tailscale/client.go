@@ -71,20 +71,23 @@ type Service struct {
 	Hostname    string
 	BackendAddr string // host:port of the backend
 	Port        int    // frontend port to expose on the Tailscale service
+	Proto       string // "https" (default) or "tcp"
 	Tag         string // Tailscale ACL tag (e.g. "tag:server")
 }
 
 // Client manages the Tailscale serve config via the local API.
 type Client struct {
-	socket string
-	logger *zap.Logger
-	http   *http.Client
+	socket  string
+	tailnet string
+	logger  *zap.Logger
+	http    *http.Client
 }
 
-func NewClient(socket string, logger *zap.Logger) *Client {
+func NewClient(socket, tailnet string, logger *zap.Logger) *Client {
 	return &Client{
-		socket: socket,
-		logger: logger,
+		socket:  socket,
+		tailnet: tailnet,
+		logger:  logger,
 		http: &http.Client{
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -151,6 +154,9 @@ func normalizeConfig(cfg *ServeConfig) {
 	for _, svc := range cfg.Services {
 		if svc.TCP == nil {
 			svc.TCP = make(map[uint16]*TCPPortHandler)
+		}
+		if svc.Web == nil {
+			svc.Web = make(map[HostPort]*WebServerConfig)
 		}
 	}
 }
@@ -271,10 +277,32 @@ func (c *Client) buildServeConfig(services []Service) *ServeConfig {
 		}
 
 		svcName := fmt.Sprintf("svc:%s", svc.Hostname)
-		cfg.Services[svcName] = &ServiceConfig{
-			TCP: map[uint16]*TCPPortHandler{
-				port: {TCPForward: svc.BackendAddr},
-			},
+
+		proto := svc.Proto
+		if proto == "" {
+			proto = "https"
+		}
+
+		if proto == "https" {
+			hp := HostPort(fmt.Sprintf("%s.%s:%d", svc.Hostname, c.tailnet, port))
+			cfg.Services[svcName] = &ServiceConfig{
+				TCP: map[uint16]*TCPPortHandler{
+					port: {HTTPS: true},
+				},
+				Web: map[HostPort]*WebServerConfig{
+					hp: {
+						Handlers: map[string]*HTTPHandler{
+							"/": {Proxy: "http://" + svc.BackendAddr},
+						},
+					},
+				},
+			}
+		} else {
+			cfg.Services[svcName] = &ServiceConfig{
+				TCP: map[uint16]*TCPPortHandler{
+					port: {TCPForward: svc.BackendAddr},
+				},
+			}
 		}
 	}
 
