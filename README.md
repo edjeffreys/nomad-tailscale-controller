@@ -21,23 +21,24 @@ A controller that watches [Consul](https://www.consul.io/) for services tagged w
                                  │ PATCH /localapi/v0/prefs
                                  │  → AdvertiseServices
                                  │ POST /localapi/v0/serve-config
-                                 │  → TCP forwarding rules
+                                 │  → HTTPS/TCP handler rules
                                  ▼
                         ┌────────────────┐
                         │ Tailscale node │
                         │ (sidecar task) │
                         │                │
                         │ Registers as a │
-                        │ service host & │
-                        │ proxies traffic│
-                        │ to backends    │
+                        │ service host,  │
+                        │ terminates TLS │
+                        │ & proxies to   │
+                        │ backends       │
                         └────────────────┘
 ```
 
 1. **Discover** — watches the Consul catalog (via blocking queries + poll fallback) for services tagged with `tailscale.enable=true`
 2. **Ensure VIP Services** — auto-creates [Tailscale VIP Service](https://tailscale.com/kb/1438/vip-services) definitions via the control plane API (requires OAuth credentials)
 3. **Advertise** — tells the local Tailscale node to register as a host for each managed service via `PATCH /localapi/v0/prefs`
-4. **Apply serve config** — posts TCP forwarding rules to the local Tailscale daemon, mapping each service's port to its Consul backend address
+4. **Apply serve config** — posts HTTPS (TLS termination + HTTP proxy) or TCP forwarding rules to the local Tailscale daemon, mapping each service's port to its Consul backend address
 
 One Tailscale node serves all your tagged services — no sidecar-per-service required.
 
@@ -190,9 +191,9 @@ Add `tailscale.enable=true` to any Consul-registered service and redeploy — th
 The controller runs as a Nomad job with two tasks in the same group:
 
 - **tailscale** (sidecar) — a Tailscale node that registers as a service host and proxies traffic to backends. Shares its daemon socket with the controller via Nomad's `/alloc/tmp/` directory.
-- **controller** — watches Consul, manages VIP service definitions, advertises services, and applies TCP forwarding rules to the Tailscale node.
+- **controller** — watches Consul, manages VIP service definitions, advertises services, and configures HTTPS/TCP handlers on the Tailscale node.
 
-Traffic flows: **Tailscale client → Tailscale VIP → Tailscale node → Consul service backend**
+Traffic flows: **Tailscale client → HTTPS → Tailscale VIP → TLS termination → HTTP → Consul service backend**
 
 ## Development
 
