@@ -139,6 +139,16 @@ func (c *Client) Apply(services []Service) error {
 		return nil
 	}
 
+	// If handler types changed (e.g. TCP→HTTPS), tailscaled rejects in-place
+	// updates. Clear the config first, then apply the new one.
+	if c.hasHandlerConflict(current, desired) {
+		c.logger.Info("clearing serve config before applying (handler type change)")
+		empty := &ServeConfig{Services: make(map[string]*ServiceConfig)}
+		if err := c.postConfig(empty); err != nil {
+			return fmt.Errorf("failed to clear serve config: %w", err)
+		}
+	}
+
 	if err := c.postConfig(desired); err != nil {
 		return err
 	}
@@ -159,6 +169,29 @@ func normalizeConfig(cfg *ServeConfig) {
 			svc.Web = make(map[HostPort]*WebServerConfig)
 		}
 	}
+}
+
+// hasHandlerConflict returns true if any service port is changing handler type
+// (e.g. TCPForward → HTTPS or vice versa), which tailscaled rejects in-place.
+func (c *Client) hasHandlerConflict(current, desired *ServeConfig) bool {
+	for svcName, dSvc := range desired.Services {
+		cSvc, ok := current.Services[svcName]
+		if !ok {
+			continue
+		}
+		for port, dHandler := range dSvc.TCP {
+			cHandler, ok := cSvc.TCP[port]
+			if !ok {
+				continue
+			}
+			currentIsTCP := cHandler.TCPForward != ""
+			desiredIsTCP := dHandler.TCPForward != ""
+			if currentIsTCP != desiredIsTCP {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 const localAPIBase = "http://local-tailscaled.sock/localapi/v0/serve-config"

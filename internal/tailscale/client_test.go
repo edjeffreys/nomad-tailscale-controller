@@ -699,6 +699,102 @@ t.Errorf("expected 2 services, got %d", len(decoded.AdvertiseServices))
 }
 }
 
+func TestHasHandlerConflict_TCPToHTTPS(t *testing.T) {
+c := &Client{tailnet: "tail5f17e.ts.net", logger: zap.NewNop()}
+
+current := &ServeConfig{
+Services: map[string]*ServiceConfig{
+"svc:mealie": {TCP: map[uint16]*TCPPortHandler{443: {TCPForward: "mealie:9000"}}},
+},
+}
+desired := &ServeConfig{
+Services: map[string]*ServiceConfig{
+"svc:mealie": {TCP: map[uint16]*TCPPortHandler{443: {HTTPS: true}}},
+},
+}
+
+if !c.hasHandlerConflict(current, desired) {
+t.Error("expected conflict when switching from TCP to HTTPS")
+}
+}
+
+func TestHasHandlerConflict_NoConflict(t *testing.T) {
+c := &Client{tailnet: "tail5f17e.ts.net", logger: zap.NewNop()}
+
+current := &ServeConfig{
+Services: map[string]*ServiceConfig{
+"svc:mealie": {TCP: map[uint16]*TCPPortHandler{443: {HTTPS: true}}},
+},
+}
+desired := &ServeConfig{
+Services: map[string]*ServiceConfig{
+"svc:mealie": {TCP: map[uint16]*TCPPortHandler{443: {HTTPS: true}}},
+},
+}
+
+if c.hasHandlerConflict(current, desired) {
+t.Error("expected no conflict when handler type is the same")
+}
+}
+
+func TestApply_ClearsConfigOnHandlerConflict(t *testing.T) {
+oldConfig := &ServeConfig{
+Services: map[string]*ServiceConfig{
+"svc:mealie": {
+TCP: map[uint16]*TCPPortHandler{443: {TCPForward: "mealie:9000"}},
+Web: map[HostPort]*WebServerConfig{},
+},
+},
+}
+advertised := []string{"svc:mealie"}
+
+var posts []string
+mux := http.NewServeMux()
+mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
+if r.Method == http.MethodGet {
+json.NewEncoder(w).Encode(oldConfig)
+// After first POST (the clear), return empty config for subsequent GETs
+return
+}
+body, _ := io.ReadAll(r.Body)
+posts = append(posts, string(body))
+w.WriteHeader(http.StatusOK)
+})
+mux.HandleFunc("/localapi/v0/prefs", defaultPrefsHandler(&advertised))
+
+srv := httptest.NewServer(mux)
+t.Cleanup(srv.Close)
+
+c := &Client{
+tailnet: "tail5f17e.ts.net",
+logger: zap.NewNop(),
+http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, target: srv.URL}},
+}
+
+services := []Service{
+{Hostname: "mealie", BackendAddr: "mealie:9000", Port: 443},
+}
+
+if err := c.Apply(services); err != nil {
+t.Fatal(err)
+}
+
+// Should have posted twice: first an empty clear, then the real config
+if len(posts) != 2 {
+t.Fatalf("expected 2 POSTs (clear + apply), got %d", len(posts))
+}
+
+// First POST should be empty config (clears all services)
+if posts[0] != "{}" && !contains(posts[0], `"Services":{}`) {
+t.Errorf("first POST should clear config, got: %s", posts[0])
+}
+
+// Second POST should have the HTTPS config
+if !contains(posts[1], `"HTTPS":true`) {
+t.Errorf("second POST should have HTTPS config, got: %s", posts[1])
+}
+}
+
 // rewriteTransport rewrites requests to localAPIBase to point at the test server.
 type rewriteTransport struct {
 base   http.RoundTripper
