@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"slices"
@@ -287,9 +288,10 @@ func (c *Client) buildServeConfig(services []Service) *ServeConfig {
 	}
 
 	for _, svc := range services {
-		port := uint16(svc.Port)
-		if port == 0 {
-			port = 443
+		// Default to 443 if the service port is zero or out of range for uint16.
+		port := uint16(443)
+		if svc.Port > 0 && svc.Port <= math.MaxUint16 {
+			port = uint16(svc.Port)
 		}
 
 		svcName := fmt.Sprintf("svc:%s", svc.Hostname)
