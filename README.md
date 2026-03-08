@@ -1,35 +1,43 @@
 # nomad-tailscale-controller
 
-A controller that watches [Consul](https://www.consul.io/) for services tagged with `tailscale.enable=true` and automatically exposes them as [Tailscale Services](https://tailscale.com/kb/1438/vip-services) — similar to how [Traefik](https://doc.traefik.io/traefik/providers/consul-catalog/) uses Consul Catalog tags for routing, but for your private Tailscale network.
+A controller that watches [Consul](https://www.consul.io/) for services tagged with `tailscale.enable=true` and automatically exposes them as [Tailscale VIP Services](https://tailscale.com/kb/1438/vip-services). Tag your services the same way you would for [Traefik](https://doc.traefik.io/traefik/providers/consul-catalog/) — one Tailscale node serves them all.
 
 ## How it works
 
 ```
-┌──────────────────┐         ┌──────────────────┐         ┌──────────────────┐
-│  Consul Catalog   │         │    Controller     │         │   Tailscale API   │
-│                   │◄────────│                   │────────►│  (control plane)  │
-│  service: mealie  │ blocking│  1. Discover svcs │  PUT    │                   │
-│  tags:            │  query  │  2. Ensure VIP    │ /vip-   │  Creates svc:     │
-│   - tailscale.    │         │     service defs  │ services│  mealie VIP       │
-│     enable=true   │         │  3. Apply local   │         │  auto-assigns IP  │
-│                   │         │     serve config  │         │                   │
-└──────────────────┘         └────────┬─────────┘         └──────────────────┘
-                                      │
-                                      │ POST /localapi/v0/serve-config
-                                      ▼
-                             ┌──────────────────┐
-                             │  Tailscale node   │
-                             │  (sidecar)        │
-                             │                   │
-                             │  Advertises       │
-                             │  endpoints for    │
-                             │  all managed svcs │
-                             └──────────────────┘
+┌────────────────┐       ┌────────────────┐       ┌────────────────┐
+│ Consul Catalog │       │   Controller   │       │ Tailscale API  │
+│                │◄──────│                │──────►│ (control plane)│
+│ service: mealie│ block │ 1. Discover    │  PUT  │                │
+│ tags:          │ query │    services    │ /vip- │ Creates svc:   │
+│  - tailscale.  │       │ 2. Ensure VIP  │ svcs  │ mealie with    │
+│    enable=true │       │    definitions │       │ auto-assigned  │
+│                │       │ 3. Advertise   │       │ VIP address    │
+│                │       │    services    │       │                │
+│                │       │ 4. Apply serve │       │                │
+│                │       │    config      │       │                │
+└────────────────┘       └───────┬────────┘       └────────────────┘
+                                 │
+                                 │ PATCH /localapi/v0/prefs
+                                 │  → AdvertiseServices
+                                 │ POST /localapi/v0/serve-config
+                                 │  → TCP forwarding rules
+                                 ▼
+                        ┌────────────────┐
+                        │ Tailscale node │
+                        │ (sidecar task) │
+                        │                │
+                        │ Registers as a │
+                        │ service host & │
+                        │ proxies traffic│
+                        │ to backends    │
+                        └────────────────┘
 ```
 
 1. **Discover** — watches the Consul catalog (via blocking queries + poll fallback) for services tagged with `tailscale.enable=true`
-2. **Ensure VIP Services** — if OAuth credentials are configured, auto-creates [Tailscale VIP Service](https://tailscale.com/kb/1438/vip-services) definitions via the control plane API so you don't have to manually define them in the admin console
-3. **Apply serve config** — posts a [Tailscale Services configuration](https://tailscale.com/kb/1242/tailscale-serve) to the local Tailscale daemon via its Unix socket API, mapping each service's VIP port to its Consul backend address
+2. **Ensure VIP Services** — auto-creates [Tailscale VIP Service](https://tailscale.com/kb/1438/vip-services) definitions via the control plane API (requires OAuth credentials)
+3. **Advertise** — tells the local Tailscale node to register as a host for each managed service via `PATCH /localapi/v0/prefs`
+4. **Apply serve config** — posts TCP forwarding rules to the local Tailscale daemon, mapping each service's port to its Consul backend address
 
 One Tailscale node serves all your tagged services — no sidecar-per-service required.
 
@@ -109,7 +117,7 @@ To enable automatic VIP service creation, create an OAuth client in the [Tailsca
 2. Grant the **Services: Write** scope
 3. Store the client ID and secret securely (e.g. in Nomad variables)
 
-Without OAuth credentials, the controller runs in **local-only mode** — it still configures the Tailscale node's serve config, but you'll need to manually create VIP service definitions in the admin console.
+Without OAuth credentials, the controller runs in **local-only mode** — it still advertises services and configures the Tailscale node's serve config, but you'll need to manually create VIP service definitions in the admin console.
 
 ### Tailscale ACL auto-approvers
 
@@ -167,8 +175,8 @@ Add `tailscale.enable=true` to any Consul-registered service and redeploy — th
 
 The controller runs as a Nomad job with two tasks in the same group:
 
-- **tailscale** (sidecar) — a Tailscale node that advertises all managed services. Shares its daemon socket with the controller via Nomad's `/alloc/tmp/` directory.
-- **controller** — watches Consul, manages VIP service definitions, and configures the Tailscale node's serve config.
+- **tailscale** (sidecar) — a Tailscale node that registers as a service host and proxies traffic to backends. Shares its daemon socket with the controller via Nomad's `/alloc/tmp/` directory.
+- **controller** — watches Consul, manages VIP service definitions, advertises services, and applies TCP forwarding rules to the Tailscale node.
 
 Traffic flows: **Tailscale client → Tailscale VIP → Tailscale node → Consul service backend**
 
