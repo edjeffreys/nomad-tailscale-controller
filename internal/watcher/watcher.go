@@ -258,12 +258,29 @@ func (w *Watcher) fetchServices(ctx context.Context) ([]tailscale.Service, error
 				continue
 			}
 			inst := instances[0]
-			addr := inst.ServiceAddress
-			if addr == "" {
-				addr = inst.Address
-			}
 			servicePort = inst.ServicePort
-			backend = fmt.Sprintf("%s:%d", addr, servicePort)
+
+			// Prefer Consul Connect virtual address (mesh routing via Envoy).
+			// Falls back to direct address for non-mesh services.
+			if va, ok := inst.ServiceTaggedAddresses["consul-virtual"]; ok {
+				addr := va.Address
+				port := va.Port
+				if port == 0 {
+					port = servicePort
+				}
+				servicePort = port
+				backend = fmt.Sprintf("%s:%d", addr, port)
+				w.logger.Debug("using consul virtual address",
+					zap.String("service", svcName),
+					zap.String("backend", backend),
+				)
+			} else {
+				addr := inst.ServiceAddress
+				if addr == "" {
+					addr = inst.Address
+				}
+				backend = fmt.Sprintf("%s:%d", addr, servicePort)
+			}
 		}
 
 		// Default protocol: HTTPS with TLS termination by Tailscale.
