@@ -244,7 +244,7 @@ t.Error("Proxy should survive round-trip")
 }
 }
 
-func TestApply_SkipsWhenUnchanged(t *testing.T) {
+func TestApply_AlwaysAppliesConfig(t *testing.T) {
 existingConfig := &ServeConfig{
 Services: map[string]*ServiceConfig{
 "svc:myapp": {
@@ -263,14 +263,14 @@ Handlers: map[string]*HTTPHandler{
 }
 advertised := []string{"svc:myapp"}
 
-postCalled := false
+postCount := 0
 mux := http.NewServeMux()
 mux.HandleFunc("/localapi/v0/serve-config", func(w http.ResponseWriter, r *http.Request) {
 if r.Method == http.MethodGet {
 json.NewEncoder(w).Encode(existingConfig)
 return
 }
-postCalled = true
+postCount++
 w.WriteHeader(http.StatusOK)
 })
 mux.HandleFunc("/localapi/v0/prefs", defaultPrefsHandler(&advertised))
@@ -291,8 +291,9 @@ services := []Service{
 if err := c.Apply(services); err != nil {
 t.Fatal(err)
 }
-if postCalled {
-t.Error("expected POST to be skipped when config is unchanged")
+// Should always clear + apply (2 POSTs)
+if postCount != 2 {
+t.Errorf("expected 2 POSTs (clear + apply), got %d", postCount)
 }
 }
 
@@ -609,8 +610,8 @@ t.Errorf("error should mention advertise, got: %s", err)
 }
 }
 
-func TestApply_EmptyServicesNoopWhenAlreadyEmpty(t *testing.T) {
-postCalled := false
+func TestApply_EmptyServicesStillApplies(t *testing.T) {
+postCount := 0
 advertised := []string{}
 
 mux := http.NewServeMux()
@@ -619,7 +620,7 @@ if r.Method == http.MethodGet {
 w.Write([]byte("{}"))
 return
 }
-postCalled = true
+postCount++
 w.WriteHeader(http.StatusOK)
 })
 mux.HandleFunc("/localapi/v0/prefs", defaultPrefsHandler(&advertised))
@@ -636,8 +637,9 @@ http:   &http.Client{Transport: &rewriteTransport{base: srv.Client().Transport, 
 if err := c.Apply(nil); err != nil {
 t.Fatal(err)
 }
-if postCalled {
-t.Error("POST should not be called when both current and desired are empty")
+// Always clear + apply (2 POSTs), even when empty
+if postCount != 2 {
+t.Errorf("expected 2 POSTs, got %d", postCount)
 }
 }
 

@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"reflect"
 	"slices"
 	"sort"
 
@@ -101,14 +100,6 @@ func NewClient(socket, tailnet string, logger *zap.Logger) *Client {
 func (c *Client) Apply(services []Service) error {
 	desired := c.buildServeConfig(services)
 
-	current, err := c.getConfig()
-	if err != nil {
-		return fmt.Errorf("failed to read current serve config: %w", err)
-	}
-
-	normalizeConfig(current)
-	normalizeConfig(desired)
-
 	// Compute the desired list of service names to advertise.
 	desiredNames := make([]string, 0, len(services))
 	for _, svc := range services {
@@ -133,20 +124,12 @@ func (c *Client) Apply(services []Service) error {
 		c.logger.Info("advertised services updated", zap.Strings("services", desiredNames))
 	}
 
-	// Update serve config.
-	if reflect.DeepEqual(current.Services, desired.Services) {
-		c.logger.Debug("serve config unchanged, skipping apply")
-		return nil
-	}
-
-	// If handler types changed (e.g. TCP→HTTPS), tailscaled rejects in-place
-	// updates. Clear the config first, then apply the new one.
-	if c.hasHandlerConflict(current, desired) {
-		c.logger.Info("clearing serve config before applying (handler type change)")
-		empty := &ServeConfig{Services: make(map[string]*ServiceConfig)}
-		if err := c.postConfig(empty); err != nil {
-			return fmt.Errorf("failed to clear serve config: %w", err)
-		}
+	// Always clear and reapply the serve config. This avoids stale comparisons
+	// and handler type conflicts (e.g. TCP→HTTPS). The POST is idempotent.
+	c.logger.Debug("clearing serve config before applying")
+	empty := &ServeConfig{Services: make(map[string]*ServiceConfig)}
+	if err := c.postConfig(empty); err != nil {
+		return fmt.Errorf("failed to clear serve config: %w", err)
 	}
 
 	if err := c.postConfig(desired); err != nil {
